@@ -124,6 +124,9 @@ class Adam4118MonitorBackend:
             raise ValueError("At least one ADAM-4118 channel name is required")
         self.client = client
         self.channel_names = names
+        self.flow_channel_names: tuple[str, ...] = ()
+        self.monitored_devices = ("ADAM4118",)
+        self.poll_interval_ms = 500
 
     def read(self, timestamp: float) -> SensorSnapshot:
         values = self.client.read_all(minimum_channels=len(self.channel_names))

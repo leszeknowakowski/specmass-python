@@ -123,3 +123,11 @@ third payload fields were `-0.48`, `-0.24`, `-0.04`, and `-0.04` ml/min, matchin
 the magnitude and channel ordering visible in the legacy LabVIEW flow graph.
 Python now supports both the type-2 and type-4 measured-flow layouts without
 relaxing checksum, input-port, or requested-channel validation.
+
+## Combined read-only hardware monitor
+
+The PyQt5 UI can now plot the validated ADAM-4118 temperatures and Brooks 0254
+flows together using `--hardware-monitor --allow-read-hardware`. It polls COM14
+and COM13 approximately once per second. The flow reader is a separate
+`Brooks0254ReadOnlyClient` with no setpoint API, the combined backend rejects
+every control command, and all actuator widgets remain disabled.

@@ -156,3 +156,14 @@ python -m specmass.ui --temperature-monitor --builds "D:\_SpecMass\Builds" --all
 
 This mode polls COM14 every 500 ms. All actuator controls are disabled, and its
 backend rejects every control command rather than silently ignoring one.
+
+After both read-only probes report `ok`, temperatures and all four Brooks flow
+channels can be monitored together:
+
+```bat
+python -m specmass.ui --hardware-monitor --builds "D:\_SpecMass\Builds" --allow-read-hardware
+```
+
+The combined monitor reads COM14 and COM13 approximately once per second. Its
+Brooks client has no setpoint method, and the shared backend rejects all heater,
+valve, and flow commands. Do not run it concurrently with LabVIEW.

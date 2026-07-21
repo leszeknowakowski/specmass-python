@@ -12,6 +12,8 @@ import pyqtgraph as pg
 from PyQt5 import QtCore, QtGui, QtWidgets
 
 from .devices.adam4118 import Adam4118Client, Adam4118MonitorBackend
+from .devices.brooks0254 import Brooks0254ReadOnlyClient
+from .devices.read_only_monitor import ReadOnlyHardwareMonitorBackend
 from .devices.serial_transport import PySerialTransaction, SerialSettings
 from .devices.simulated import SimulatedBackend
 from .legacy import load_legacy_json, load_program
@@ -65,6 +67,41 @@ def _create_adam4118_monitor(builds_directory: Path) -> Adam4118MonitorBackend:
     client = Adam4118Client(transport, address=int(config.get("DeviceAddress", 1)))
     names = tuple(str(name) for name in config.get("InputChannels", ()))
     return Adam4118MonitorBackend(client, channel_names=names)
+
+
+def _create_hardware_monitor(builds_directory: Path) -> ReadOnlyHardwareMonitorBackend:
+    temperature_monitor = _create_adam4118_monitor(builds_directory)
+    try:
+        config = load_legacy_json(builds_directory / "data" / "BrooksDevTh")
+        port = str(config.get("Source", "")).strip()
+        if not port:
+            raise ValueError("BrooksDevTh Source/COM port is missing")
+        channels = tuple(str(value) for value in config.get("InputChannels", ()))
+        expected_channels = tuple(str(index) for index in range(len(channels)))
+        if not channels or len(channels) > 4 or channels != expected_channels:
+            raise ValueError(
+                "BrooksDevTh InputChannels must be consecutive channels 0 through 3"
+            )
+        timeout_seconds = float(config.get("Timeout", 1000.0)) / 1000.0
+        settings = SerialSettings(
+            port=port,
+            baudrate=int(config.get("BaudRate", 9600)),
+            timeout_seconds=max(0.001, timeout_seconds),
+            write_timeout_seconds=max(0.001, timeout_seconds),
+            read_terminator=b"\n",
+        )
+        flow_client = Brooks0254ReadOnlyClient(
+            PySerialTransaction(settings, hardware_enabled=True),
+            channel_count=len(channels),
+        )
+        return ReadOnlyHardwareMonitorBackend(
+            temperature_monitor,
+            flow_client,
+            flow_channel_names=tuple(f"Ch{channel}" for channel in channels),
+        )
+    except Exception:
+        temperature_monitor.safe_shutdown()
+        raise
 
 
 def _format_elapsed(seconds: float) -> str:
@@ -222,7 +259,7 @@ class SpecMassWindow(QtWidgets.QMainWindow):
         self,
         *,
         initial_program: Path | None = None,
-        temperature_monitor: Adam4118MonitorBackend | None = None,
+        monitor_backend: Adam4118MonitorBackend | ReadOnlyHardwareMonitorBackend | None = None,
     ) -> None:
         super().__init__()
         self.setWindowTitle("Mass Spectrometer Station — SpecMass Python simulator")
@@ -235,7 +272,7 @@ class SpecMassWindow(QtWidgets.QMainWindow):
         self.controller: ProcessController | None = None
         self.runtime: SpecMassRuntime | None = None
         self.telemetry: CsvTelemetryWriter | TdmsTelemetryWriter | None = None
-        self.temperature_monitor = temperature_monitor
+        self.monitor_backend = monitor_backend
         self._monitor_error = False
         self._monitor_started_monotonic = 0.0
         self._running = False
@@ -266,8 +303,8 @@ class SpecMassWindow(QtWidgets.QMainWindow):
         self.monitor_timer.setTimerType(QtCore.Qt.PreciseTimer)
         self.monitor_timer.timeout.connect(self._monitor_tick)
         self._update_controls()
-        if self.temperature_monitor is not None:
-            self._start_temperature_monitor()
+        if self.monitor_backend is not None:
+            self._start_hardware_monitor()
         elif initial_program is not None:
             self.load_program(initial_program)
 
@@ -542,16 +579,22 @@ class SpecMassWindow(QtWidgets.QMainWindow):
         if chosen:
             self.load_program(Path(chosen))
 
-    def _start_temperature_monitor(self) -> None:
-        assert self.temperature_monitor is not None
-        self.setWindowTitle("Mass Spectrometer Station — SpecMass read-only temperature monitor")
+    def _start_hardware_monitor(self) -> None:
+        assert self.monitor_backend is not None
+        flow_names = tuple(getattr(self.monitor_backend, "flow_channel_names", ()))
+        combined = bool(flow_names)
+        monitor_name = "hardware" if combined else "temperature"
+        self.setWindowTitle(
+            f"Mass Spectrometer Station — SpecMass read-only {monitor_name} monitor"
+        )
+        devices = "ADAM4118 + BROOKS0254" if combined else "ADAM4118"
         self.mode_banner.setText(
-            "READ-ONLY ADAM4118 MONITOR — ALL HEATER, VALVE, AND FLOW OUTPUTS DISABLED"
+            f"READ-ONLY {devices} MONITOR — ALL HEATER, VALVE, AND FLOW OUTPUTS DISABLED"
         )
         self.mode_banner.setStyleSheet(
             "background:#fff4cc; color:#714b00; font-weight:700; padding:4px;"
         )
-        self.program_label.setText("No program — temperature monitor only")
+        self.program_label.setText(f"No program — {monitor_name} monitor only")
         self.status_label.setText("Monitoring")
         self.stage_label.setText("—")
         self.setpoint_label.setText("—")
@@ -559,36 +602,48 @@ class SpecMassWindow(QtWidgets.QMainWindow):
         self.remaining_label.setText("—")
         self.output_label.setText("Read-only; no actuator output")
         self.temperature_plot.configure_series(
-            self.temperature_monitor.channel_names,
+            self.monitor_backend.channel_names,
             ("#111111", "#df3e3e"),
         )
-        self.flow_plot.configure_series((), FLOW_COLORS)
+        self.flow_plot.configure_series(flow_names, FLOW_COLORS)
+        self._build_flow_channels(len(flow_names))
         self.mass_plot.configure_series((), MASS_COLORS)
         self._monitor_started_monotonic = time.monotonic()
         self._update_device_states()
         self._update_controls()
+        self.monitor_timer.setInterval(
+            int(getattr(self.monitor_backend, "poll_interval_ms", 500))
+        )
         self.monitor_timer.start()
         QtCore.QTimer.singleShot(0, self._monitor_tick)
 
     def _monitor_tick(self) -> None:
-        if self.temperature_monitor is None or self._monitor_error:
+        if self.monitor_backend is None or self._monitor_error:
             self.monitor_timer.stop()
             return
         timestamp = time.monotonic() - self._monitor_started_monotonic
         try:
-            snapshot = self.temperature_monitor.read(timestamp)
+            snapshot = self.monitor_backend.read(timestamp)
         except Exception as exc:
             self._monitor_error = True
             self.monitor_timer.stop()
-            self.temperature_monitor.safe_shutdown()
+            self.monitor_backend.safe_shutdown()
             self.status_label.setText("Read Error")
             self._update_device_states(error=True)
-            QtWidgets.QMessageBox.critical(self, "ADAM4118 read error", str(exc))
+            QtWidgets.QMessageBox.critical(self, "Hardware monitor read error", str(exc))
             return
         values = snapshot.temperatures or (snapshot.temperature,)
         self.temperature_label.setText(" / ".join(f"{value:.2f} °C" for value in values))
         self.process_time_label.setText(_format_elapsed(timestamp))
         self.temperature_plot.append(timestamp, tuple(values))
+        if snapshot.flows:
+            self.flow_plot.append(timestamp, snapshot.flows)
+            channel = self.flow_list.currentRow()
+            if 0 <= channel < len(snapshot.flows):
+                self.flow_info_label.setText(
+                    f"Brooks1/{channel}: measured {snapshot.flows[channel]:.3g} ml/min; "
+                    "read-only, writes disabled"
+                )
 
     def load_program(self, path: Path) -> None:
         if self._running:
@@ -822,9 +877,12 @@ class SpecMassWindow(QtWidgets.QMainWindow):
         self.f2_lamp.set_state("running" if filament == "F2" else "disabled")
 
     def _update_device_states(self, *, error: bool = False) -> None:
-        if self.temperature_monitor is not None:
+        if self.monitor_backend is not None:
+            monitored_devices = set(
+                getattr(self.monitor_backend, "monitored_devices", ("ADAM4118",))
+            )
             for name, label in self._device_state_labels.items():
-                if name == "ADAM4118":
+                if name in monitored_devices:
                     state = "Error" if error or self._monitor_error else "Monitoring"
                     lamp_state = "error" if state == "Error" else "running"
                 else:
@@ -846,7 +904,7 @@ class SpecMassWindow(QtWidgets.QMainWindow):
             self._device_lamps[name].set_state(state)
 
     def _update_controls(self) -> None:
-        if self.temperature_monitor is not None:
+        if self.monitor_backend is not None:
             self.load_button.setEnabled(False)
             self.details_button.setEnabled(False)
             self.start_button.setEnabled(False)
@@ -924,8 +982,8 @@ class SpecMassWindow(QtWidgets.QMainWindow):
     def closeEvent(self, event: QtGui.QCloseEvent) -> None:
         self.tick_timer.stop()
         self.monitor_timer.stop()
-        if self.temperature_monitor is not None:
-            self.temperature_monitor.safe_shutdown()
+        if self.monitor_backend is not None:
+            self.monitor_backend.safe_shutdown()
         if self.runtime is not None:
             self.runtime.safe_shutdown()
         elif self.backend is not None:
@@ -937,24 +995,31 @@ class SpecMassWindow(QtWidgets.QMainWindow):
 def main() -> int:
     parser = argparse.ArgumentParser(description="SpecMass PyQt5 desktop UI")
     parser.add_argument("--program", type=Path, help="initial folder containing Stage*.msdef")
-    parser.add_argument(
+    monitor_group = parser.add_mutually_exclusive_group()
+    monitor_group.add_argument(
         "--temperature-monitor",
         action="store_true",
         help="read and plot ADAM4118 temperatures without enabling any actuator",
+    )
+    monitor_group.add_argument(
+        "--hardware-monitor",
+        action="store_true",
+        help="read and plot ADAM4118 temperatures and Brooks flows without enabling actuators",
     )
     parser.add_argument("--builds", type=Path, help="folder containing MassSpec.exe and data")
     parser.add_argument(
         "--allow-read-hardware",
         action="store_true",
-        help="explicitly permit read-only ADAM4118 serial queries",
+        help="explicitly permit read-only ADAM4118 and/or Brooks serial queries",
     )
     args = parser.parse_args()
-    if args.temperature_monitor and args.builds is None:
-        parser.error("--temperature-monitor requires --builds")
-    if args.temperature_monitor and not args.allow_read_hardware:
-        parser.error("--temperature-monitor requires --allow-read-hardware")
-    if args.temperature_monitor and args.program is not None:
-        parser.error("--temperature-monitor cannot be combined with --program")
+    monitor_requested = args.temperature_monitor or args.hardware_monitor
+    if monitor_requested and args.builds is None:
+        parser.error("a hardware monitor requires --builds")
+    if monitor_requested and not args.allow_read_hardware:
+        parser.error("a hardware monitor requires --allow-read-hardware")
+    if monitor_requested and args.program is not None:
+        parser.error("a hardware monitor cannot be combined with --program")
 
     QtWidgets.QApplication.setAttribute(QtCore.Qt.AA_EnableHighDpiScaling, True)
     QtWidgets.QApplication.setAttribute(QtCore.Qt.AA_UseHighDpiPixmaps, True)
@@ -962,16 +1027,19 @@ def main() -> int:
     application = QtWidgets.QApplication(sys.argv[:1])
     application.setApplicationName("SpecMass Python")
     application.setStyle("Fusion")
-    temperature_monitor = None
-    if args.temperature_monitor:
+    monitor_backend = None
+    if monitor_requested:
         try:
-            temperature_monitor = _create_adam4118_monitor(args.builds)
+            if args.hardware_monitor:
+                monitor_backend = _create_hardware_monitor(args.builds)
+            else:
+                monitor_backend = _create_adam4118_monitor(args.builds)
         except Exception as exc:
-            QtWidgets.QMessageBox.critical(None, "Cannot configure ADAM4118 monitor", str(exc))
+            QtWidgets.QMessageBox.critical(None, "Cannot configure hardware monitor", str(exc))
             return 2
     window = SpecMassWindow(
         initial_program=args.program,
-        temperature_monitor=temperature_monitor,
+        monitor_backend=monitor_backend,
     )
     window.show()
     return int(application.exec_())

@@ -193,20 +193,42 @@ class Brooks0254Codec:
         return f"AZ{unit_address:05d}.{port:02d}"
 
 
-class Brooks0254Client:
-    """Small driver over an injected guarded transport; it never opens by itself."""
+class Brooks0254ReadOnlyClient:
+    """Measured-flow-only client with no setpoint API."""
 
-    def __init__(self, transport: SerialTransaction, *, unit_address: int | None = None) -> None:
+    def __init__(
+        self,
+        transport: SerialTransaction,
+        *,
+        unit_address: int | None = None,
+        channel_count: int = 4,
+    ) -> None:
+        if not 1 <= int(channel_count) <= 4:
+            raise ValueError("Brooks 0254 channel count must be between 1 and 4")
         self.transport = transport
         self.unit_address = unit_address
+        self.channel_count = int(channel_count)
 
     def read_flow(self, channel: int) -> float:
+        channel = Brooks0254Codec._channel(channel)
+        if channel >= self.channel_count:
+            raise ValueError(f"Brooks channel {channel} is not configured")
         request = Brooks0254Codec.read_flow_command(channel, unit_address=self.unit_address)
         expected_port = 2 * Brooks0254Codec._channel(channel) + 1
         return Brooks0254Codec.parse_flow_response(
             self.transport.transact(request),
             expected_port=expected_port,
         )
+
+    def read_all(self) -> tuple[float, ...]:
+        return tuple(self.read_flow(channel) for channel in range(self.channel_count))
+
+    def close(self) -> None:
+        self.transport.close()
+
+
+class Brooks0254Client(Brooks0254ReadOnlyClient):
+    """Full client over an injected guarded transport; it never opens by itself."""
 
     def set_flow(self, channel: int, value: float) -> BrooksResponse:
         request = Brooks0254Codec.set_flow_command(channel, value, unit_address=self.unit_address)
@@ -225,6 +247,3 @@ class Brooks0254Client:
                 f"Setpoint acknowledgement returned {returned_value}, expected {float(value)}"
             )
         return response
-
-    def close(self) -> None:
-        self.transport.close()

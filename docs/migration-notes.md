@@ -112,6 +112,11 @@ field. The codec accepts both layouts, requires an odd input port, verifies that
 the returned port matches the requested channel, and continues to distinguish
 short type-4 `Pzz` parameter acknowledgements from measured-flow packets.
 
+The validated Brooks reader is now combined with the ADAM-4118 reader in an
+explicit PyQt5 hardware-monitor mode. The GUI shows both temperature channels
+and all four measured flows, while the monitor's Brooks client exposes no
+setpoint operation and its backend rejects every control command.
+
 ## Instrument inventory correction
 
 The zero-I/O report made on the instrument computer shows that its active Hiden

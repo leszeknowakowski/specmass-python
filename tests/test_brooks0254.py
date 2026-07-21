@@ -3,6 +3,7 @@ import unittest
 from specmass.devices.brooks0254 import (
     Brooks0254Client,
     Brooks0254Codec,
+    Brooks0254ReadOnlyClient,
     BrooksChangeOnlyDispatcher,
     BrooksProtocolError,
 )
@@ -71,6 +72,29 @@ class BrooksCodecTests(unittest.TestCase):
         raw = response("AZ,00909.03,4,0,0,-0.24,0,0,X,X,X,X,X,")
         with self.assertRaisesRegex(BrooksProtocolError, "port 3, expected 1"):
             Brooks0254Codec.parse_flow_response(raw, expected_port=1)
+
+    def test_read_only_client_has_no_setpoint_api_and_reads_all_channels(self):
+        class FlowTransport:
+            def __init__(self):
+                self.requests = []
+
+            def transact(inner_self, request):
+                inner_self.requests.append(request)
+                channel = (int(request[3:5]) - 1) // 2
+                port = 2 * channel + 1
+                return response(f"AZ,00909.{port:02d},4,0,0,{channel + 0.5},0,0,X,X,X,X,X,")
+
+            def close(inner_self):
+                pass
+
+        transport = FlowTransport()
+        client = Brooks0254ReadOnlyClient(transport)
+        self.assertEqual(client.read_all(), (0.5, 1.5, 2.5, 3.5))
+        self.assertFalse(hasattr(client, "set_flow"))
+        self.assertEqual(
+            transport.requests,
+            [b"AZ.01K\r", b"AZ.03K\r", b"AZ.05K\r", b"AZ.07K\r"],
+        )
 
     def test_checksum_excludes_az_packet_prelimiter(self):
         frame = b"AZ,06022,4,Brooks Instrument,Model 0254,08,V10.05.13,FE00,"
