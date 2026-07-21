@@ -249,7 +249,7 @@ def probe_brooks_read_only(
                         "payload": parsed.payload,
                     }
                 )
-                value = Brooks0254Codec.parse_flow_response(raw)
+                value = Brooks0254Codec.parse_flow_response(raw, expected_port=2 * channel + 1)
             except Exception as exc:
                 message = f"channel {channel} protocol error: {type(exc).__name__}: {exc}"
                 errors.append(message)

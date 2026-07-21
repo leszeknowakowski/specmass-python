@@ -52,6 +52,26 @@ class BrooksCodecTests(unittest.TestCase):
         raw = response("AZ,00909.01,2,xxxxxxxx.xx,00162871.43,-0000003.27,X,X,X,X,X,X,")
         self.assertEqual(Brooks0254Codec.parse_flow_response(raw), -3.27)
 
+    def test_deployed_firmware_polled_flow_response_is_parsed(self):
+        raw = (
+            b"AZ,16773.01,4,  215239.20,  215239.20,      -0.48,"
+            b"      -0.48,08214,X,X,X,X,X,C8\r\n"
+        )
+        self.assertEqual(
+            Brooks0254Codec.parse_flow_response(raw, expected_port=1),
+            -0.48,
+        )
+
+    def test_parameter_acknowledgement_is_not_accepted_as_flow(self):
+        raw = response("AZ,00909.01,4,P01,30,")
+        with self.assertRaises(BrooksProtocolError):
+            Brooks0254Codec.parse_flow_response(raw)
+
+    def test_flow_response_must_match_requested_port(self):
+        raw = response("AZ,00909.03,4,0,0,-0.24,0,0,X,X,X,X,X,")
+        with self.assertRaisesRegex(BrooksProtocolError, "port 3, expected 1"):
+            Brooks0254Codec.parse_flow_response(raw, expected_port=1)
+
     def test_checksum_excludes_az_packet_prelimiter(self):
         frame = b"AZ,06022,4,Brooks Instrument,Model 0254,08,V10.05.13,FE00,"
         self.assertEqual(Brooks0254Codec.response_checksum(frame), 0x9E)

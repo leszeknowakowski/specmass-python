@@ -104,6 +104,14 @@ comma before the two hexadecimal checksum characters. The deployed controller
 returned `C9`; including `AZ` incorrectly produced `2E`. The corrected codec is
 covered by the manufacturer's documented `9E` identification-frame example.
 
+The follow-up diagnostic identified the deployed unit as address `16773`,
+firmware `V17.01.31`. Its `K` replies use response type `4`, the protocol's
+polled-information format, rather than the type `2` form shown in the dedicated
+`K` example. Both layouts place the rate/process value in the third payload
+field. The codec accepts both layouts, requires an odd input port, verifies that
+the returned port matches the requested channel, and continues to distinguish
+short type-4 `Pzz` parameter acknowledgements from measured-flow packets.
+
 ## Instrument inventory correction
 
 The zero-I/O report made on the instrument computer shows that its active Hiden

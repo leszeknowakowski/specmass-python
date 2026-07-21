@@ -133,6 +133,17 @@ python -m specmass.hardware_inventory --builds "D:\_SpecMass\Builds" --output "D
 This opt-in probe sends one documented read-all-input command and has no output
 command path.
 
+The Brooks 0254 flow inputs can be checked separately on COM13. This probe
+sends identification and `K` measured-value requests only:
+
+```bat
+python -m specmass.hardware_inventory --builds "D:\_SpecMass\Builds" --output "brooks-read-only.json" --probe-brooks --allow-read-queries
+```
+
+It validates packet checksums, input-port/channel correspondence, and both the
+type-2 and deployed firmware's type-4 measured-value layouts. It never sends a
+`P01` setpoint command.
+
 The same validated input can be displayed continuously in a read-only PyQt5
 monitor. Copy the current project to the instrument computer, close LabVIEW,
 and run:

@@ -59,6 +59,19 @@ class FakeUnexpectedBrooksTransport(FakeBrooksTransport):
         return brooks_response("AZ,00909.01,4,P01,30,")
 
 
+class FakeDeployedBrooksTransport(FakeBrooksTransport):
+    def transact(self, request: bytes) -> bytes:
+        self.requests.append(request)
+        if request == b"AZI\r":
+            return b"AZ,16773,4,Brooks Instrument,Model 0254,08,V17.01.31,FE00,8D\r\n"
+        channel = (int(request[3:5]) - 1) // 2
+        port = 2 * channel + 1
+        value = -0.48 + 0.12 * channel
+        return brooks_response(
+            f"AZ,16773.{port:02d},4,100,100,{value:.2f},{value:.2f},08214,X,X,X,X,X,"
+        )
+
+
 class HardwareInventoryTests(unittest.TestCase):
     def make_builds(self, root: Path) -> Path:
         builds = root / "Builds"
@@ -162,6 +175,25 @@ class HardwareInventoryTests(unittest.TestCase):
         self.assertIn("raw_ascii", result["responses"][1])
         self.assertEqual(result["setpoint_writes"], 0)
         self.assertTrue(transport.closed)
+
+    def test_brooks_probe_accepts_deployed_polled_response_layout(self):
+        device = ConfiguredDevice(
+            thread_name="BrooksDevTh",
+            role="Brooks flow controller",
+            device_name="Brooks1",
+            configured_port="COM13",
+            baudrate=9600,
+            enabled=True,
+            input_channels=("0", "1", "2", "3"),
+            output_channels=("0", "1", "2", "3"),
+            port_status="available",
+        )
+        transport = FakeDeployedBrooksTransport()
+        result = probe_brooks_read_only(device, transaction_factory=lambda _settings: transport)
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["measured_flows"], [-0.48, -0.36, -0.24, -0.12])
+        self.assertTrue(all(response.get("checksum_valid", True) for response in result["responses"]))
+        self.assertEqual(result["setpoint_writes"], 0)
 
     def test_adam4118_probe_sends_one_read_all_command(self):
         device = ConfiguredDevice(

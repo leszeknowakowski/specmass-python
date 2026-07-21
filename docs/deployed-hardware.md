@@ -116,3 +116,10 @@ had incorrectly included the `AZ` packet pre-limiter in the negated modulo-256
 sum. The Brooks protocol defines the checksum frame as beginning with the comma
 immediately after `AZ`. Correcting that boundary converts `2E` to `C9`; no
 setpoint command was sent during this diagnosis.
+
+The raw diagnostic then confirmed unit address `16773`, firmware `V17.01.31`,
+and valid type-4 polled measurement packets for all four input ports. Their
+third payload fields were `-0.48`, `-0.24`, `-0.04`, and `-0.04` ml/min, matching
+the magnitude and channel ordering visible in the legacy LabVIEW flow graph.
+Python now supports both the type-2 and type-4 measured-flow layouts without
+relaxing checksum, input-port, or requested-channel validation.

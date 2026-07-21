@@ -150,10 +150,27 @@ class Brooks0254Codec:
         )
 
     @classmethod
-    def parse_flow_response(cls, raw: bytes, *, verify_checksum: bool = True) -> float:
+    def parse_flow_response(
+        cls,
+        raw: bytes,
+        *,
+        verify_checksum: bool = True,
+        expected_port: int | None = None,
+    ) -> float:
         response = cls.parse_response(raw, verify_checksum=verify_checksum)
-        if response.response_type != 2 or len(response.payload) < 3:
+        # Older documentation illustrates K replies with type 2. The deployed
+        # V17.01.31 firmware returns the polled-information type 4 layout.
+        # In both layouts payload[2] is the RATE/process value.
+        if (
+            response.response_type not in (2, 4)
+            or response.port not in (1, 3, 5, 7)
+            or len(response.payload) < 3
+        ):
             raise BrooksProtocolError("Response is not a measured-channel value packet")
+        if expected_port is not None and response.port != int(expected_port):
+            raise BrooksProtocolError(
+                f"Measured flow response came from port {response.port}, expected {expected_port}"
+            )
         try:
             return float(response.payload[2])
         except ValueError as exc:
@@ -185,7 +202,11 @@ class Brooks0254Client:
 
     def read_flow(self, channel: int) -> float:
         request = Brooks0254Codec.read_flow_command(channel, unit_address=self.unit_address)
-        return Brooks0254Codec.parse_flow_response(self.transport.transact(request))
+        expected_port = 2 * Brooks0254Codec._channel(channel) + 1
+        return Brooks0254Codec.parse_flow_response(
+            self.transport.transact(request),
+            expected_port=expected_port,
+        )
 
     def set_flow(self, channel: int, value: float) -> BrooksResponse:
         request = Brooks0254Codec.set_flow_command(channel, value, unit_address=self.unit_address)
