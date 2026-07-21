@@ -107,3 +107,12 @@ python -m specmass.ui --temperature-monitor --builds "D:\_SpecMass\Builds" --all
 
 Do not run this monitor concurrently with LabVIEW because both applications
 would contend for COM14.
+
+## Brooks read-only checksum validation
+
+The first COM13 read probe reached the controller but Python initially reported
+received checksum `C9` versus calculated `2E`. The response was valid: Python
+had incorrectly included the `AZ` packet pre-limiter in the negated modulo-256
+sum. The Brooks protocol defines the checksum frame as beginning with the comma
+immediately after `AZ`. Correcting that boundary converts `2E` to `C9`; no
+setpoint command was sent during this diagnosis.

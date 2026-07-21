@@ -52,6 +52,10 @@ class BrooksCodecTests(unittest.TestCase):
         raw = response("AZ,00909.01,2,xxxxxxxx.xx,00162871.43,-0000003.27,X,X,X,X,X,X,")
         self.assertEqual(Brooks0254Codec.parse_flow_response(raw), -3.27)
 
+    def test_checksum_excludes_az_packet_prelimiter(self):
+        frame = b"AZ,06022,4,Brooks Instrument,Model 0254,08,V10.05.13,FE00,"
+        self.assertEqual(Brooks0254Codec.response_checksum(frame), 0x9E)
+
     def test_checksum_mismatch_is_rejected(self):
         with self.assertRaises(BrooksProtocolError):
             Brooks0254Codec.parse_response(b"AZ,00909.01,4,P01,30.0,00\r\n")

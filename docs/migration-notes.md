@@ -97,6 +97,13 @@ not expose that switch yet. `BrooksChangeOnlyDispatcher` reproduces the legacy
 zero-initialized `PrevData` behavior. Live setpoint scaling must still be
 verified before this client is connected to the runtime backend.
 
+The first instrument probe exposed and resolved a checksum-boundary defect.
+The two-byte `AZ` packet pre-limiter is not part of the checksum; the negated
+modulo-256 sum starts with the comma immediately after `AZ` and ends with the
+comma before the two hexadecimal checksum characters. The deployed controller
+returned `C9`; including `AZ` incorrectly produced `2E`. The corrected codec is
+covered by the manufacturer's documented `9E` identification-frame example.
+
 ## Instrument inventory correction
 
 The zero-I/O report made on the instrument computer shows that its active Hiden

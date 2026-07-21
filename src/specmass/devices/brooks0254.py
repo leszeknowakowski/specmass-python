@@ -107,8 +107,11 @@ class Brooks0254Codec:
         return f"{cls._address(port, unit_address)}P01={value:g}\r".encode("ascii")
 
     @staticmethod
-    def response_checksum(information_frame: bytes) -> int:
-        """Return the documented negated modulo-256 byte sum."""
+    def response_checksum(packet_or_information_frame: bytes) -> int:
+        """Return the negated mod-256 sum of the frame after the ``AZ`` pre-limiter."""
+        information_frame = packet_or_information_frame
+        if information_frame.startswith(b"AZ"):
+            information_frame = information_frame[2:]
         return (-sum(information_frame)) & 0xFF
 
     @classmethod
