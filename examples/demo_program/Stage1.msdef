@@ -1,0 +1,17 @@
+{
+  "Name": "Ramp",
+  "StartTemp": 25.0,
+  "EndTemp": 30.0,
+  "TempMode": 1,
+  "TempA": 60.0,
+  "StartFlow": [2.0, 1.0],
+  "EndFlow": [2.0, 1.0],
+  "FlowA": [0.0, 0.0],
+  "ValveStates": [0, 1],
+  "ValvePulseLength": [0.5, 0.0],
+  "ValvePulseGap": [0.5, 0.0],
+  "ValveMode": [1, 0],
+  "AutoStart": true,
+  "Duration": 0.0,
+  "StabilizeTemp": false
+}

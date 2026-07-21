@@ -1,0 +1,12 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+.idea/
+.run-output/
+simulation*.csv
+specmass-hardware-inventory.json
+adam4118-read-only.json
+dist/
+build/
+*.egg-info/

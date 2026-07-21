@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "specmass"
+version = "0.1.0"
+description = "Python migration of the SpecMass LabVIEW application"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "numpy>=1.26,<3",
+    "PyQt5>=5.15,<6",
+    "pyqtgraph>=0.13,<1",
+]
+
+[project.optional-dependencies]
+tdms = ["nptdms>=1.11,<2"]
+hardware = ["nptdms>=1.11,<2", "pyserial>=3.5,<4"]
+inventory = ["pyserial>=3.5,<4"]
+
+[project.scripts]
+specmass-sim = "specmass.cli:main"
+specmass-ui = "specmass.ui:main"
+specmass-validate = "specmass.validate_cli:main"
+specmass-hardware-inventory = "specmass.hardware_inventory:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]

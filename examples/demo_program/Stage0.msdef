@@ -1,0 +1,17 @@
+{
+  "Name": "Warmup",
+  "StartTemp": 25.0,
+  "EndTemp": 25.0,
+  "TempMode": 0,
+  "TempA": 0.0,
+  "StartFlow": [1.0, 0.5],
+  "EndFlow": [2.0, 1.0],
+  "FlowA": [30.0, 15.0],
+  "ValveStates": [0, 1],
+  "ValvePulseLength": [0.0, 0.0],
+  "ValvePulseGap": [0.0, 0.0],
+  "ValveMode": [0, 0],
+  "AutoStart": true,
+  "Duration": 3.0,
+  "StabilizeTemp": false
+}
