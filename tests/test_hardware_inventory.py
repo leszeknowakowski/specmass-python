@@ -51,6 +51,14 @@ class FakeAdamTransport:
         self.closed = True
 
 
+class FakeUnexpectedBrooksTransport(FakeBrooksTransport):
+    def transact(self, request: bytes) -> bytes:
+        self.requests.append(request)
+        if request == b"AZI\r":
+            return b"AZ,00909,4,BROOKS,0254,08,V10.05.13,FE00,9E\r\n"
+        return brooks_response("AZ,00909.01,4,P01,30,")
+
+
 class HardwareInventoryTests(unittest.TestCase):
     def make_builds(self, root: Path) -> Path:
         builds = root / "Builds"
@@ -132,6 +140,27 @@ class HardwareInventoryTests(unittest.TestCase):
         self.assertEqual(result["setpoint_writes"], 0)
         self.assertEqual(transport.requests[0], b"AZI\r")
         self.assertTrue(all(b"P01" not in request for request in transport.requests))
+        self.assertTrue(transport.closed)
+
+    def test_brooks_probe_preserves_raw_structural_errors_for_diagnosis(self):
+        device = ConfiguredDevice(
+            thread_name="BrooksDevTh",
+            role="Brooks flow controller",
+            device_name="Brooks1",
+            configured_port="COM13",
+            baudrate=9600,
+            enabled=True,
+            input_channels=("0",),
+            output_channels=("0",),
+            port_status="available",
+        )
+        transport = FakeUnexpectedBrooksTransport()
+        result = probe_brooks_read_only(device, transaction_factory=lambda _settings: transport)
+        self.assertEqual(result["status"], "protocol-error")
+        self.assertEqual(result["measured_flows"], [None])
+        self.assertIn("Response is not a measured-channel value packet", result["errors"][0])
+        self.assertIn("raw_ascii", result["responses"][1])
+        self.assertEqual(result["setpoint_writes"], 0)
         self.assertTrue(transport.closed)
 
     def test_adam4118_probe_sends_one_read_all_command(self):

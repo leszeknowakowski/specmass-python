@@ -10,7 +10,7 @@ import platform
 from typing import Any, Callable, Iterable
 
 from .devices.adam4118 import Adam4118Client, Adam4118Codec
-from .devices.brooks0254 import Brooks0254Client, Brooks0254Codec
+from .devices.brooks0254 import Brooks0254Codec
 from .devices.serial_transport import PySerialTransaction, SerialSettings, SerialTransaction
 from .legacy import load_legacy_json
 
@@ -197,26 +197,87 @@ def probe_brooks_read_only(
     )
     transport = factory(settings)
     requests: list[str] = []
+    responses: list[dict[str, Any]] = []
+    errors: list[str] = []
     try:
         identify_request = Brooks0254Codec.identify_command()
         requests.append(identify_request.decode("ascii").replace("\r", "\\r"))
         identify_response = transport.transact(identify_request)
-        client = Brooks0254Client(transport)
-        flows: list[float] = []
+        responses.append(
+            {
+                "kind": "identify",
+                "request": requests[-1],
+                "raw_ascii": _escaped_ascii(identify_response),
+                "raw_hex": identify_response.hex(" "),
+            }
+        )
+        flows: list[float | None] = []
         for channel in range(len(device.input_channels)):
             request = Brooks0254Codec.read_flow_command(channel)
-            requests.append(request.decode("ascii").replace("\r", "\\r"))
-            flows.append(client.read_flow(channel))
+            request_text = request.decode("ascii").replace("\r", "\\r")
+            requests.append(request_text)
+            try:
+                raw = transport.transact(request)
+            except Exception as exc:
+                message = f"channel {channel} transport error: {type(exc).__name__}: {exc}"
+                errors.append(message)
+                responses.append(
+                    {
+                        "kind": "measured_flow",
+                        "channel": channel,
+                        "request": request_text,
+                        "error": message,
+                    }
+                )
+                flows.append(None)
+                continue
+            record: dict[str, Any] = {
+                "kind": "measured_flow",
+                "channel": channel,
+                "request": request_text,
+                "raw_ascii": _escaped_ascii(raw),
+                "raw_hex": raw.hex(" "),
+            }
+            try:
+                parsed = Brooks0254Codec.parse_response(raw)
+                record.update(
+                    {
+                        "checksum_valid": True,
+                        "unit_address": parsed.unit_address,
+                        "port": parsed.port,
+                        "response_type": parsed.response_type,
+                        "payload": parsed.payload,
+                    }
+                )
+                value = Brooks0254Codec.parse_flow_response(raw)
+            except Exception as exc:
+                message = f"channel {channel} protocol error: {type(exc).__name__}: {exc}"
+                errors.append(message)
+                record["error"] = message
+                value = None
+            record["measured_flow"] = value
+            responses.append(record)
+            flows.append(value)
         return {
-            "status": "ok",
+            "status": "ok" if not errors else "protocol-error",
             "port": device.configured_port,
-            "identification_raw_ascii": identify_response.decode("ascii", errors="backslashreplace"),
+            "identification_raw_ascii": _escaped_ascii(identify_response),
             "measured_flows": flows,
             "requests": requests,
+            "responses": responses,
+            "errors": errors,
             "setpoint_writes": 0,
         }
     finally:
         transport.close()
+
+
+def _escaped_ascii(raw: bytes) -> str:
+    return (
+        raw.decode("ascii", errors="backslashreplace")
+        .replace("\r", "\\r")
+        .replace("\n", "\\n")
+    )
 
 
 def probe_adam4118_read_only(
