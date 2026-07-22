@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import importlib.util
 import sys
 import time
 from collections import deque
 from pathlib import Path
+from typing import Any, Mapping
 
 import numpy as np
 import pyqtgraph as pg
@@ -17,8 +19,15 @@ from .devices.brooks0254 import Brooks0254ReadOnlyClient
 from .devices.read_only_monitor import ReadOnlyHardwareMonitorBackend
 from .devices.serial_transport import PySerialTransaction, SerialSettings
 from .devices.simulated import SimulatedBackend
-from .legacy import load_legacy_json, load_program
-from .models import ProcessProgram, TemperatureMode
+from .hiden import (
+    DEFAULT_HIDEN_MASS_NAMES,
+    HidenScanPlan,
+    hiden_scan_label,
+    load_hiden_connection,
+    new_hiden_mass_scan,
+)
+from .legacy import load_legacy_json, load_program, save_legacy_json
+from .models import ProcessProgram, TemperatureMode, ValveMode
 from .pid import PIDController, PIDGains
 from .runtime import SpecMassRuntime
 from .safety import SafetyPolicy
@@ -42,6 +51,32 @@ MASS_COLORS = (
     "#f59e0b",
     "#2563eb",
     "#ec4899",
+)
+
+SAVED_HIDEN_IDENTITY = 'HAL RC RGA 201 #16359'
+HIDEN_ENVIRONMENT_PARAMETERS: tuple[tuple[str, str, str], ...] = (
+    ("multiplier", "0", "V"),
+    ("curtail-clipping", "0", "(1 = on, 0 = off)"),
+    ("F1", "0", "(1 = on, 0 = off)"),
+    ("F2", "0", "(1 = on, 0 = off)"),
+    ("resolution", "0", "%"),
+    ("delta-m", "0", "%"),
+    ("mass", "5.50", "amu"),
+    ("emission", "1000.00", "uA"),
+    ("electron-energy", "70.00", "V"),
+    ("cage", "3.00", "V"),
+    ("focus", "-90", "V"),
+    ("mode-change-delay", "1000", "ms"),
+    ("Faraday_range", "-5", "mbar"),
+    ("Faraday", "0.00", "mbar"),
+    ("SEM_range", "-7", "mbar"),
+    ("SEM", "0.00", "mbar"),
+    ("Total_range", "-5", "mbar"),
+    ("Total", "0.00", "mbar"),
+    ("auxiliary1_range", "0", "V"),
+    ("auxiliary1", "0.00", "V"),
+    ("auxiliary2_range", "0", "V"),
+    ("auxiliary2", "0.00", "V"),
 )
 
 
@@ -284,6 +319,99 @@ class TrendPlot(pg.PlotWidget):
         self.getPlotItem().setYRange(y_min - padding, y_max + padding, padding=0)
 
 
+class MassScanDialog(QtWidgets.QDialog):
+    """Offline editor for one single-point Hiden mass scan."""
+
+    def __init__(
+        self,
+        parent: QtWidgets.QWidget | None = None,
+        *,
+        initial_mass: float = 18.0,
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Add Hiden mass scan")
+        self.setModal(True)
+        self.setMinimumWidth(430)
+        layout = QtWidgets.QVBoxLayout(self)
+
+        explanation = QtWidgets.QLabel(
+            "This adds a definition to ScanSettings.msdef only. "
+            "It does not communicate with the Hiden instrument."
+        )
+        explanation.setWordWrap(True)
+        explanation.setObjectName("muted")
+        layout.addWidget(explanation)
+
+        form = QtWidgets.QFormLayout()
+        self.mass_spin = QtWidgets.QDoubleSpinBox()
+        self.mass_spin.setRange(0.01, 1000.0)
+        self.mass_spin.setDecimals(4)
+        self.mass_spin.setValue(initial_mass)
+        self.mass_spin.setSuffix(" m/z")
+        form.addRow("Mass", self.mass_spin)
+
+        self.input_device_box = QtWidgets.QComboBox()
+        self.input_device_box.addItems(("SEM", "Faraday"))
+        form.addRow("Input device", self.input_device_box)
+
+        self.autozero_check = QtWidgets.QCheckBox("Use autozero for this scan")
+        form.addRow("", self.autozero_check)
+
+        self.autorange_high_spin = QtWidgets.QSpinBox()
+        self.autorange_low_spin = QtWidgets.QSpinBox()
+        self.start_range_spin = QtWidgets.QSpinBox()
+        for spin in (
+            self.autorange_high_spin,
+            self.autorange_low_spin,
+            self.start_range_spin,
+        ):
+            spin.setRange(-15, 5)
+        self.autorange_high_spin.setValue(-7)
+        self.autorange_low_spin.setValue(-9)
+        self.start_range_spin.setValue(-9)
+        form.addRow("Autorange high", self.autorange_high_spin)
+        form.addRow("Autorange low", self.autorange_low_spin)
+        form.addRow("Start range", self.start_range_spin)
+
+        self.dwell_spin = QtWidgets.QSpinBox()
+        self.settle_spin = QtWidgets.QSpinBox()
+        for spin in (self.dwell_spin, self.settle_spin):
+            spin.setRange(0, 100)
+            spin.setValue(100)
+            spin.setSuffix(" %")
+        form.addRow("Dwell", self.dwell_spin)
+        form.addRow("Settle", self.settle_spin)
+        layout.addLayout(form)
+
+        buttons = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel
+        )
+        buttons.button(QtWidgets.QDialogButtonBox.Ok).setText("Add mass")
+        buttons.accepted.connect(self._validate_and_accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def scan_definition(self) -> dict[str, Any]:
+        return new_hiden_mass_scan(
+            self.mass_spin.value(),
+            input_device=self.input_device_box.currentText(),
+            use_autozero=self.autozero_check.isChecked(),
+            autorange_high=self.autorange_high_spin.value(),
+            autorange_low=self.autorange_low_spin.value(),
+            start_range=self.start_range_spin.value(),
+            dwell_percent=self.dwell_spin.value(),
+            settle_percent=self.settle_spin.value(),
+        )
+
+    def _validate_and_accept(self) -> None:
+        try:
+            self.scan_definition()
+        except ValueError as exc:
+            QtWidgets.QMessageBox.warning(self, "Invalid mass scan", str(exc))
+            return
+        self.accept()
+
+
 class SpecMassWindow(QtWidgets.QMainWindow):
     TICK_MS = 100
 
@@ -294,6 +422,7 @@ class SpecMassWindow(QtWidgets.QMainWindow):
         monitor_backend: Adam4118MonitorBackend | ReadOnlyHardwareMonitorBackend | None = None,
         monitor_telemetry: TelemetryWriter | None = None,
         monitor_output: Path | None = None,
+        builds_directory: Path | None = None,
     ) -> None:
         super().__init__()
         self.setWindowTitle("Mass Spectrometer Station — SpecMass Python simulator")
@@ -308,6 +437,7 @@ class SpecMassWindow(QtWidgets.QMainWindow):
         self.telemetry: TelemetryWriter | None = monitor_telemetry
         self.monitor_backend = monitor_backend
         self.monitor_output = monitor_output
+        self.builds_directory = builds_directory
         self._monitor_error = False
         self._monitor_started_monotonic = 0.0
         self._running = False
@@ -319,6 +449,18 @@ class SpecMassWindow(QtWidgets.QMainWindow):
         self._flow_override_values: list[float] = []
         self._device_state_labels: dict[str, QtWidgets.QLabel] = {}
         self._device_lamps: dict[str, StatusLamp] = {}
+        self._scan_settings_working: dict[str, Any] | None = None
+        self._scan_settings_dirty = False
+        self._hiden_mass_names = dict(DEFAULT_HIDEN_MASS_NAMES)
+        if builds_directory is not None:
+            try:
+                connection = load_hiden_connection(builds_directory)
+            except (FileNotFoundError, OSError, TypeError, ValueError):
+                pass
+            else:
+                self._hiden_mass_names.update(
+                    {item.mass: item.name for item in connection.masses}
+                )
 
         self._build_layout()
         self._apply_styles()
@@ -337,6 +479,7 @@ class SpecMassWindow(QtWidgets.QMainWindow):
         self.monitor_timer.setInterval(500)
         self.monitor_timer.setTimerType(QtCore.Qt.PreciseTimer)
         self.monitor_timer.timeout.connect(self._monitor_tick)
+        self._refresh_program_config()
         self._update_controls()
         if self.monitor_backend is not None:
             self._start_hardware_monitor()
@@ -359,8 +502,15 @@ class SpecMassWindow(QtWidgets.QMainWindow):
             QPushButton:disabled {{ color: #9aa0a6; background: #eceae7; }}
             QPushButton#primary {{ font-size: 10pt; font-weight: 700; min-height: 40px; }}
             QPushButton#stop {{ font-size: 10pt; font-weight: 700; min-height: 40px; }}
-            QListWidget, QComboBox, QDoubleSpinBox {{ background: white; border: 1px solid #aab0b6; padding: 3px; }}
+            QListWidget, QComboBox, QDoubleSpinBox, QSpinBox, QLineEdit, QTableWidget {{
+                background: white; border: 1px solid #aab0b6; padding: 3px;
+            }}
             QListWidget::item:selected {{ background: #087cc1; color: white; }}
+            QPushButton#roundAction {{
+                border: 3px solid #111111; border-radius: 30px; background: white;
+                font-size: 27pt; font-weight: 400; padding: 0px;
+            }}
+            QPushButton#roundAction:hover {{ background: #e9f4fb; border-color: #087cc1; }}
             QHeaderView::section {{ background: #e7f8fd; padding: 5px; border: 1px solid #c9d1d8; }}
             """
         )
@@ -378,6 +528,21 @@ class SpecMassWindow(QtWidgets.QMainWindow):
         self.mode_banner.setObjectName("simulation")
         self.mode_banner.setAlignment(QtCore.Qt.AlignCenter)
         root_layout.addWidget(self.mode_banner)
+
+        self.page_stack = QtWidgets.QStackedWidget()
+        self.dashboard_page = self._build_dashboard_page()
+        self.program_config_page = self._build_program_config_page()
+        self.hiden_config_page = self._build_hiden_config_page()
+        self.page_stack.addWidget(self.dashboard_page)
+        self.page_stack.addWidget(self.program_config_page)
+        self.page_stack.addWidget(self.hiden_config_page)
+        root_layout.addWidget(self.page_stack, 1)
+
+    def _build_dashboard_page(self) -> QtWidgets.QWidget:
+        page = QtWidgets.QWidget()
+        page_layout = QtWidgets.QVBoxLayout(page)
+        page_layout.setContentsMargins(0, 0, 0, 0)
+        page_layout.setSpacing(0)
 
         workspace = QtWidgets.QWidget()
         workspace_layout = QtWidgets.QGridLayout(workspace)
@@ -418,8 +583,266 @@ class SpecMassWindow(QtWidgets.QMainWindow):
             colors=MASS_COLORS,
         )
         workspace_layout.addWidget(self.mass_plot, 1, 1, 1, 2)
-        root_layout.addWidget(workspace, 1)
-        root_layout.addWidget(self._build_footer())
+        page_layout.addWidget(workspace, 1)
+        page_layout.addWidget(self._build_footer())
+        return page
+
+    @staticmethod
+    def _read_only_spin(*, suffix: str = "", decimals: int = 3) -> QtWidgets.QDoubleSpinBox:
+        spin = QtWidgets.QDoubleSpinBox()
+        spin.setRange(-1_000_000.0, 1_000_000.0)
+        spin.setDecimals(decimals)
+        spin.setSuffix(suffix)
+        spin.setReadOnly(True)
+        spin.setButtonSymbols(QtWidgets.QAbstractSpinBox.NoButtons)
+        return spin
+
+    def _build_program_config_page(self) -> QtWidgets.QWidget:
+        page = QtWidgets.QWidget()
+        outer = QtWidgets.QHBoxLayout(page)
+        outer.setContentsMargins(24, 24, 24, 24)
+        outer.setSpacing(28)
+
+        left = QtWidgets.QFrame()
+        left.setObjectName("panel")
+        left.setMinimumWidth(430)
+        left.setMaximumWidth(560)
+        left_layout = QtWidgets.QVBoxLayout(left)
+        toolbar = QtWidgets.QHBoxLayout()
+        self.open_program_button = QtWidgets.QPushButton("Open\nprogram folder")
+        self.open_program_button.setMinimumSize(120, 58)
+        self.open_program_button.clicked.connect(self._choose_program)
+        toolbar.addWidget(self.open_program_button)
+        self.stage_table_button = QtWidgets.QPushButton("Stage table")
+        self.stage_table_button.setMinimumSize(100, 58)
+        self.stage_table_button.clicked.connect(self._show_stages)
+        toolbar.addWidget(self.stage_table_button)
+        toolbar.addStretch(1)
+        left_layout.addLayout(toolbar)
+        left_layout.addWidget(self._section_label("Program stages"))
+        self.config_program_path_label = QtWidgets.QLabel("No program loaded")
+        self.config_program_path_label.setObjectName("muted")
+        self.config_program_path_label.setWordWrap(True)
+        left_layout.addWidget(self.config_program_path_label)
+        self.stage_list = QtWidgets.QListWidget()
+        self.stage_list.currentRowChanged.connect(self._populate_stage_editor)
+        left_layout.addWidget(self.stage_list, 1)
+        note = QtWidgets.QLabel(
+            "Stage values are shown read-only in this migration step. "
+            "Hiden scan definitions can be edited on the next screen."
+        )
+        note.setObjectName("muted")
+        note.setWordWrap(True)
+        left_layout.addWidget(note)
+
+        right = QtWidgets.QFrame()
+        right.setObjectName("panel")
+        right_layout = QtWidgets.QVBoxLayout(right)
+        right_layout.addWidget(self._section_label("Selected stage configuration"))
+
+        temperature_grid = QtWidgets.QGridLayout()
+        self.stage_temperature_mode = QtWidgets.QComboBox()
+        self.stage_temperature_mode.addItems(("Isothermal", "Polythermal"))
+        self.stage_temperature_mode.setEnabled(False)
+        self.stage_duration = self._read_only_spin(suffix=" s")
+        self.stage_start_temperature = self._read_only_spin(suffix=" °C")
+        self.stage_end_temperature = self._read_only_spin(suffix=" °C")
+        self.stage_temperature_rate = self._read_only_spin(suffix=" °C/min")
+        self.stage_auto_start = QtWidgets.QCheckBox("Auto start")
+        self.stage_stabilize = QtWidgets.QCheckBox("Stabilize temperature")
+        self.stage_auto_start.setEnabled(False)
+        self.stage_stabilize.setEnabled(False)
+        temperature_grid.addWidget(QtWidgets.QLabel("Temperature mode"), 0, 0)
+        temperature_grid.addWidget(self.stage_temperature_mode, 1, 0)
+        temperature_grid.addWidget(QtWidgets.QLabel("Duration"), 0, 1)
+        temperature_grid.addWidget(self.stage_duration, 1, 1)
+        temperature_grid.addWidget(QtWidgets.QLabel("Start temperature"), 2, 0)
+        temperature_grid.addWidget(self.stage_start_temperature, 3, 0)
+        temperature_grid.addWidget(QtWidgets.QLabel("End temperature"), 2, 1)
+        temperature_grid.addWidget(self.stage_end_temperature, 3, 1)
+        temperature_grid.addWidget(QtWidgets.QLabel("Temperature rise"), 2, 2)
+        temperature_grid.addWidget(self.stage_temperature_rate, 3, 2)
+        temperature_grid.addWidget(self.stage_auto_start, 4, 0)
+        temperature_grid.addWidget(self.stage_stabilize, 4, 1)
+        temperature_grid.setColumnStretch(3, 1)
+        right_layout.addLayout(temperature_grid)
+        right_layout.addWidget(self._separator())
+
+        device_layout = QtWidgets.QGridLayout()
+        device_layout.addWidget(self._section_label("Valves"), 0, 0)
+        self.stage_valve_list = QtWidgets.QListWidget()
+        self.stage_valve_list.currentRowChanged.connect(self._populate_stage_valve)
+        device_layout.addWidget(self.stage_valve_list, 1, 0, 4, 1)
+        self.stage_valve_state = QtWidgets.QCheckBox("State B (unchecked = A)")
+        self.stage_valve_state.setEnabled(False)
+        self.stage_valve_mode = QtWidgets.QComboBox()
+        self.stage_valve_mode.addItems(("Constant", "Impulse"))
+        self.stage_valve_mode.setEnabled(False)
+        self.stage_pulse_length = self._read_only_spin(suffix=" s")
+        self.stage_pulse_gap = self._read_only_spin(suffix=" s")
+        device_layout.addWidget(self.stage_valve_state, 1, 1)
+        device_layout.addWidget(QtWidgets.QLabel("Mode"), 2, 1)
+        device_layout.addWidget(self.stage_valve_mode, 3, 1)
+        device_layout.addWidget(QtWidgets.QLabel("Pulse length"), 2, 2)
+        device_layout.addWidget(self.stage_pulse_length, 3, 2)
+        device_layout.addWidget(QtWidgets.QLabel("Pulse gap"), 2, 3)
+        device_layout.addWidget(self.stage_pulse_gap, 3, 3)
+
+        device_layout.addWidget(self._section_label("Flow Controllers"), 5, 0)
+        self.stage_flow_list = QtWidgets.QListWidget()
+        self.stage_flow_list.currentRowChanged.connect(self._populate_stage_flow)
+        device_layout.addWidget(self.stage_flow_list, 6, 0, 4, 1)
+        self.stage_start_flow = self._read_only_spin(suffix=" ml/min")
+        self.stage_end_flow = self._read_only_spin(suffix=" ml/min")
+        self.stage_flow_rate = self._read_only_spin(suffix=" ml/min²")
+        device_layout.addWidget(QtWidgets.QLabel("Start flow"), 7, 1)
+        device_layout.addWidget(self.stage_start_flow, 8, 1)
+        device_layout.addWidget(QtWidgets.QLabel("End flow"), 7, 2)
+        device_layout.addWidget(self.stage_end_flow, 8, 2)
+        device_layout.addWidget(QtWidgets.QLabel("Flow rise"), 7, 3)
+        device_layout.addWidget(self.stage_flow_rate, 8, 3)
+        device_layout.setColumnStretch(0, 2)
+        device_layout.setColumnStretch(4, 1)
+        right_layout.addLayout(device_layout, 1)
+
+        self.environment_scan_button = QtWidgets.QPushButton(
+            "Environment and scan configuration"
+        )
+        self.environment_scan_button.setMinimumHeight(46)
+        self.environment_scan_button.clicked.connect(self._show_hiden_config)
+        right_layout.addWidget(self.environment_scan_button, alignment=QtCore.Qt.AlignHCenter)
+
+        outer.addWidget(left)
+        outer.addWidget(right, 1)
+        return page
+
+    def _build_hiden_config_page(self) -> QtWidgets.QWidget:
+        page = QtWidgets.QWidget()
+        outer = QtWidgets.QHBoxLayout(page)
+        outer.setContentsMargins(32, 28, 32, 28)
+        outer.setSpacing(28)
+
+        left = QtWidgets.QFrame()
+        left.setObjectName("panel")
+        left_layout = QtWidgets.QVBoxLayout(left)
+        identity_row = QtWidgets.QHBoxLayout()
+        identity_column = QtWidgets.QVBoxLayout()
+        identity_column.addWidget(QtWidgets.QLabel("Hiden instrument"))
+        self.hiden_identity = QtWidgets.QLineEdit(SAVED_HIDEN_IDENTITY)
+        self.hiden_identity.setReadOnly(True)
+        self.hiden_identity.setToolTip(
+            "Saved result of the approved one-time identity query. "
+            "Opening this screen never queries COM3."
+        )
+        identity_column.addWidget(self.hiden_identity)
+        identity_row.addLayout(identity_column, 1)
+        mode_column = QtWidgets.QVBoxLayout()
+        mode_column.addWidget(QtWidgets.QLabel("Global mode"))
+        self.hiden_global_mode = QtWidgets.QComboBox()
+        self.hiden_global_mode.addItem("RGA")
+        self.hiden_global_mode.setEnabled(False)
+        mode_column.addWidget(self.hiden_global_mode)
+        identity_row.addLayout(mode_column)
+        filament_column = QtWidgets.QVBoxLayout()
+        filament_column.addWidget(QtWidgets.QLabel("Filament for scan plan"))
+        self.hiden_filament = QtWidgets.QComboBox()
+        self.hiden_filament.addItems(("F1", "F2", ""))
+        self.hiden_filament.currentTextChanged.connect(self._hiden_filament_changed)
+        filament_column.addWidget(self.hiden_filament)
+        identity_row.addLayout(filament_column)
+        left_layout.addLayout(identity_row)
+        left_layout.addWidget(self._section_label("Environment parameters (read-only snapshot)"))
+        self.hiden_parameter_table = QtWidgets.QTableWidget(
+            len(HIDEN_ENVIRONMENT_PARAMETERS), 3
+        )
+        self.hiden_parameter_table.setHorizontalHeaderLabels(
+            ("Parameter", "Value", "Description")
+        )
+        self.hiden_parameter_table.setEditTriggers(
+            QtWidgets.QAbstractItemView.NoEditTriggers
+        )
+        self.hiden_parameter_table.setSelectionBehavior(
+            QtWidgets.QAbstractItemView.SelectRows
+        )
+        for row, values in enumerate(HIDEN_ENVIRONMENT_PARAMETERS):
+            for column, value in enumerate(values):
+                self.hiden_parameter_table.setItem(
+                    row, column, QtWidgets.QTableWidgetItem(value)
+                )
+        self.hiden_parameter_table.horizontalHeader().setSectionResizeMode(
+            0, QtWidgets.QHeaderView.Stretch
+        )
+        self.hiden_parameter_table.horizontalHeader().setSectionResizeMode(
+            1, QtWidgets.QHeaderView.ResizeToContents
+        )
+        self.hiden_parameter_table.horizontalHeader().setSectionResizeMode(
+            2, QtWidgets.QHeaderView.Stretch
+        )
+        left_layout.addWidget(self.hiden_parameter_table, 1)
+        self.hiden_autozero_supported = QtWidgets.QCheckBox("Autozero supported")
+        self.hiden_autozero_supported.setChecked(True)
+        self.hiden_autozero_supported.setEnabled(False)
+        left_layout.addWidget(self.hiden_autozero_supported)
+        self.hiden_upload_button = QtWidgets.QPushButton("Upload to device")
+        self.hiden_upload_button.setEnabled(False)
+        self.hiden_upload_button.setToolTip(
+            "Disabled: Hiden environment/scan writes have not been implemented or validated."
+        )
+        left_layout.addWidget(self.hiden_upload_button)
+
+        right = QtWidgets.QFrame()
+        right.setObjectName("panel")
+        right_layout = QtWidgets.QVBoxLayout(right)
+        right_layout.addWidget(self._section_label("Scans"))
+        self.hiden_scan_path = QtWidgets.QLabel("No ScanSettings.msdef loaded")
+        self.hiden_scan_path.setObjectName("muted")
+        self.hiden_scan_path.setWordWrap(True)
+        right_layout.addWidget(self.hiden_scan_path)
+        scan_row = QtWidgets.QHBoxLayout()
+        self.hiden_scan_list = QtWidgets.QListWidget()
+        self.hiden_scan_list.setSelectionMode(
+            QtWidgets.QAbstractItemView.SingleSelection
+        )
+        self.hiden_scan_list.currentRowChanged.connect(self._hiden_scan_selected)
+        scan_row.addWidget(self.hiden_scan_list, 1)
+        actions = QtWidgets.QVBoxLayout()
+        self.add_mass_button = QtWidgets.QPushButton("+")
+        self.add_mass_button.setObjectName("roundAction")
+        self.add_mass_button.setFixedSize(64, 64)
+        self.add_mass_button.setToolTip("Add a single-mass scan")
+        self.add_mass_button.clicked.connect(self._add_hiden_mass)
+        self.remove_mass_button = QtWidgets.QPushButton("−")
+        self.remove_mass_button.setObjectName("roundAction")
+        self.remove_mass_button.setFixedSize(64, 64)
+        self.remove_mass_button.setToolTip("Remove the selected scan")
+        self.remove_mass_button.clicked.connect(self._remove_hiden_scan)
+        actions.addWidget(self.add_mass_button)
+        actions.addSpacing(24)
+        actions.addWidget(self.remove_mass_button)
+        actions.addStretch(1)
+        scan_row.addLayout(actions)
+        right_layout.addLayout(scan_row, 1)
+
+        self.hiden_editor_status = QtWidgets.QLabel(
+            "Offline editor — no Hiden command is sent"
+        )
+        self.hiden_editor_status.setObjectName("muted")
+        right_layout.addWidget(self.hiden_editor_status)
+        button_row = QtWidgets.QHBoxLayout()
+        self.save_scan_settings_button = QtWidgets.QPushButton(
+            "Save ScanSettings.msdef"
+        )
+        self.save_scan_settings_button.clicked.connect(self._save_hiden_settings)
+        self.back_to_stage_button = QtWidgets.QPushButton("Back to stage config")
+        self.back_to_stage_button.clicked.connect(self._show_program_config)
+        button_row.addWidget(self.save_scan_settings_button)
+        button_row.addStretch(1)
+        button_row.addWidget(self.back_to_stage_button)
+        right_layout.addLayout(button_row)
+
+        outer.addWidget(left, 1)
+        outer.addWidget(right, 1)
+        return page
 
     def _build_header(self) -> QtWidgets.QFrame:
         header = QtWidgets.QFrame()
@@ -428,14 +851,16 @@ class SpecMassWindow(QtWidgets.QMainWindow):
         layout.setContentsMargins(18, 12, 18, 12)
         layout.setHorizontalSpacing(10)
 
-        self.load_button = QtWidgets.QPushButton("Load\nprogram")
+        self.load_button = QtWidgets.QPushButton("Monitor\nscreen")
         self.load_button.setMinimumSize(88, 58)
-        self.load_button.clicked.connect(self._choose_program)
+        self.load_button.setToolTip("Return to the live front panel")
+        self.load_button.clicked.connect(self._show_dashboard)
         layout.addWidget(self.load_button, 0, 0, 2, 1)
 
-        self.details_button = QtWidgets.QPushButton("Program\ndetails")
+        self.details_button = QtWidgets.QPushButton("Config\nscreen")
         self.details_button.setMinimumSize(88, 58)
-        self.details_button.clicked.connect(self._show_stages)
+        self.details_button.setToolTip("Open program and scan configuration")
+        self.details_button.clicked.connect(self._show_program_config)
         layout.addWidget(self.details_button, 0, 1, 2, 1)
 
         self.start_button = QtWidgets.QPushButton("▶  START")
@@ -605,6 +1030,299 @@ class SpecMassWindow(QtWidgets.QMainWindow):
         line.setFrameShadow(QtWidgets.QFrame.Sunken)
         return line
 
+    def _show_dashboard(self, checked: bool = False) -> None:
+        del checked
+        if (
+            self.page_stack.currentWidget() is self.hiden_config_page
+            and not self._confirm_leave_hiden_editor()
+        ):
+            return
+        self.page_stack.setCurrentWidget(self.dashboard_page)
+        self._update_controls()
+
+    def _show_program_config(self, checked: bool = False) -> None:
+        del checked
+        if self.monitor_backend is not None:
+            return
+        if (
+            self.page_stack.currentWidget() is self.hiden_config_page
+            and not self._confirm_leave_hiden_editor()
+        ):
+            return
+        self._refresh_program_config()
+        self.page_stack.setCurrentWidget(self.program_config_page)
+        self._update_controls()
+
+    def _refresh_program_config(self) -> None:
+        self.stage_list.blockSignals(True)
+        self.stage_list.clear()
+        if self.program is None or self.program_path is None:
+            self.config_program_path_label.setText("No program loaded")
+            self.config_program_path_label.setToolTip("")
+            self.stage_list.blockSignals(False)
+            self._populate_stage_editor(-1)
+            self.environment_scan_button.setEnabled(False)
+            self.stage_table_button.setEnabled(False)
+            return
+        resolved = str(self.program_path.resolve())
+        self.config_program_path_label.setText(self.program_path.name)
+        self.config_program_path_label.setToolTip(resolved)
+        self.stage_list.addItems([stage.name for stage in self.program.stages])
+        self.stage_list.blockSignals(False)
+        self.environment_scan_button.setEnabled(not self._running)
+        self.stage_table_button.setEnabled(True)
+        self.stage_list.setCurrentRow(0)
+
+    def _selected_stage(self) -> Any | None:
+        row = self.stage_list.currentRow()
+        if self.program is None or not 0 <= row < len(self.program.stages):
+            return None
+        return self.program.stages[row]
+
+    def _populate_stage_editor(self, row: int) -> None:
+        stage = (
+            self.program.stages[row]
+            if self.program is not None and 0 <= row < len(self.program.stages)
+            else None
+        )
+        if stage is None:
+            self.stage_temperature_mode.setCurrentIndex(0)
+            for spin in (
+                self.stage_duration,
+                self.stage_start_temperature,
+                self.stage_end_temperature,
+                self.stage_temperature_rate,
+            ):
+                spin.setValue(0.0)
+            self.stage_auto_start.setChecked(False)
+            self.stage_stabilize.setChecked(False)
+            self.stage_valve_list.clear()
+            self.stage_flow_list.clear()
+            self._populate_stage_valve(-1)
+            self._populate_stage_flow(-1)
+            return
+        self.stage_temperature_mode.setCurrentIndex(
+            0 if stage.temperature_mode is TemperatureMode.ISOTHERMAL else 1
+        )
+        self.stage_duration.setValue(stage.duration_seconds)
+        self.stage_start_temperature.setValue(stage.start_temperature)
+        self.stage_end_temperature.setValue(stage.end_temperature)
+        self.stage_temperature_rate.setValue(stage.temperature_rate_per_minute)
+        self.stage_auto_start.setChecked(stage.auto_start)
+        self.stage_stabilize.setChecked(stage.stabilize_temperature)
+
+        self.stage_valve_list.clear()
+        self.stage_valve_list.addItems(
+            [f"VICIActuator/{index + 1}" for index in range(len(stage.valve_initial_states))]
+        )
+        if stage.valve_initial_states:
+            self.stage_valve_list.setCurrentRow(0)
+        else:
+            self._populate_stage_valve(-1)
+
+        self.stage_flow_list.clear()
+        self.stage_flow_list.addItems(
+            [f"Brooks1/{index}" for index in range(len(stage.start_flows))]
+        )
+        if stage.start_flows:
+            self.stage_flow_list.setCurrentRow(0)
+        else:
+            self._populate_stage_flow(-1)
+
+    def _populate_stage_valve(self, row: int) -> None:
+        stage = self._selected_stage()
+        if stage is None or not 0 <= row < len(stage.valve_initial_states):
+            self.stage_valve_state.setChecked(False)
+            self.stage_valve_mode.setCurrentIndex(0)
+            self.stage_pulse_length.setValue(0.0)
+            self.stage_pulse_gap.setValue(0.0)
+            return
+        self.stage_valve_state.setChecked(stage.valve_initial_states[row])
+        mode = stage.valve_modes[row] if row < len(stage.valve_modes) else ValveMode.CONSTANT
+        self.stage_valve_mode.setCurrentIndex(0 if mode is ValveMode.CONSTANT else 1)
+        length = stage.valve_pulse_lengths[row] if row < len(stage.valve_pulse_lengths) else 0.0
+        gap = stage.valve_pulse_gaps[row] if row < len(stage.valve_pulse_gaps) else 0.0
+        self.stage_pulse_length.setValue(length)
+        self.stage_pulse_gap.setValue(gap)
+
+    def _populate_stage_flow(self, row: int) -> None:
+        stage = self._selected_stage()
+        if stage is None or not 0 <= row < len(stage.start_flows):
+            self.stage_start_flow.setValue(0.0)
+            self.stage_end_flow.setValue(0.0)
+            self.stage_flow_rate.setValue(0.0)
+            return
+        self.stage_start_flow.setValue(stage.start_flows[row])
+        self.stage_end_flow.setValue(stage.end_flows[row])
+        rate = stage.flow_rates_per_minute[row] if row < len(stage.flow_rates_per_minute) else 0.0
+        self.stage_flow_rate.setValue(rate)
+
+    def _show_hiden_config(self) -> None:
+        if self.program is None or self.program_path is None or self._running:
+            return
+        self._load_hiden_editor()
+        self.page_stack.setCurrentWidget(self.hiden_config_page)
+        self._update_controls()
+
+    def _load_hiden_editor(self) -> None:
+        assert self.program is not None
+        assert self.program_path is not None
+        settings = copy.deepcopy(dict(self.program.scan_settings))
+        raw_scans = settings.get("ScansParameters", [])
+        if not isinstance(raw_scans, list):
+            raw_scans = list(raw_scans) if isinstance(raw_scans, tuple) else []
+        settings["ScansParameters"] = raw_scans
+        settings.setdefault("Filament", "F1")
+        self._scan_settings_working = settings
+        self._scan_settings_dirty = False
+
+        self.hiden_filament.blockSignals(True)
+        filament = str(settings.get("Filament", "F1")).upper()
+        index = self.hiden_filament.findText(filament)
+        self.hiden_filament.setCurrentIndex(max(0, index))
+        self.hiden_filament.blockSignals(False)
+        scan_path = self.program_path / "ScanSettings.msdef"
+        self.hiden_scan_path.setText(str(scan_path))
+        self.hiden_scan_path.setToolTip(str(scan_path.resolve()))
+        self._refresh_hiden_scan_list()
+        self._update_hiden_editor_controls()
+
+    def _refresh_hiden_scan_list(self, *, select_row: int | None = None) -> None:
+        self.hiden_scan_list.clear()
+        scans = self._working_scans()
+        for index, scan in enumerate(scans):
+            try:
+                label = hiden_scan_label(scan, names_by_mass=self._hiden_mass_names)
+            except (KeyError, TypeError, ValueError) as exc:
+                label = f"Invalid scan {index + 1}: {exc}"
+            item = QtWidgets.QListWidgetItem(f"{index + 1:02d}   {label}")
+            item.setData(QtCore.Qt.UserRole, index)
+            self.hiden_scan_list.addItem(item)
+        if scans:
+            requested = 0 if select_row is None else select_row
+            self.hiden_scan_list.setCurrentRow(min(max(0, requested), len(scans) - 1))
+        self._update_hiden_editor_controls()
+
+    def _working_scans(self) -> list[Mapping[str, Any]]:
+        if self._scan_settings_working is None:
+            return []
+        scans = self._scan_settings_working.setdefault("ScansParameters", [])
+        if not isinstance(scans, list):
+            raise TypeError("ScansParameters must be a list")
+        return scans
+
+    def _hiden_filament_changed(self, filament: str) -> None:
+        if self._scan_settings_working is None:
+            return
+        self._scan_settings_working["Filament"] = filament
+        self._set_hiden_dirty()
+
+    def _hiden_scan_selected(self, row: int) -> None:
+        self.remove_mass_button.setEnabled(row >= 0 and bool(self._working_scans()))
+
+    def _add_hiden_mass(self) -> None:
+        dialog = MassScanDialog(self)
+        if dialog.exec_() != QtWidgets.QDialog.Accepted:
+            return
+        scans = self._working_scans()
+        scans.append(dialog.scan_definition())
+        self._set_hiden_dirty()
+        self._refresh_hiden_scan_list(select_row=len(scans) - 1)
+
+    def _remove_hiden_scan(self) -> None:
+        row = self.hiden_scan_list.currentRow()
+        scans = self._working_scans()
+        if not 0 <= row < len(scans):
+            return
+        label = self.hiden_scan_list.item(row).text()
+        answer = QtWidgets.QMessageBox.question(
+            self,
+            "Remove scan",
+            f"Remove this scan definition?\n\n{label}",
+            QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+            QtWidgets.QMessageBox.No,
+        )
+        if answer != QtWidgets.QMessageBox.Yes:
+            return
+        del scans[row]
+        self._set_hiden_dirty()
+        self._refresh_hiden_scan_list(select_row=min(row, len(scans) - 1))
+
+    def _set_hiden_dirty(self) -> None:
+        self._scan_settings_dirty = True
+        self._update_hiden_editor_controls()
+
+    def _update_hiden_editor_controls(self) -> None:
+        has_editor = self._scan_settings_working is not None
+        scans = self._working_scans() if has_editor else []
+        self.add_mass_button.setEnabled(has_editor)
+        self.remove_mass_button.setEnabled(
+            has_editor and bool(scans) and self.hiden_scan_list.currentRow() >= 0
+        )
+        self.save_scan_settings_button.setEnabled(
+            has_editor and bool(scans) and self._scan_settings_dirty
+        )
+        if self._scan_settings_dirty:
+            self.hiden_editor_status.setText(
+                "Unsaved ScanSettings.msdef changes — still offline; no device command sent"
+            )
+        elif has_editor:
+            self.hiden_editor_status.setText(
+                "Saved/offline editor — opening and editing sends no Hiden command"
+            )
+        else:
+            self.hiden_editor_status.setText("No scan settings loaded")
+
+    def _save_hiden_settings(
+        self,
+        checked: bool = False,
+        *,
+        announce: bool = True,
+    ) -> bool:
+        del checked
+        if self._scan_settings_working is None or self.program_path is None:
+            return False
+        try:
+            HidenScanPlan.from_mapping(self._scan_settings_working)
+            path = self.program_path / "ScanSettings.msdef"
+            save_legacy_json(path, self._scan_settings_working)
+        except (OSError, TypeError, ValueError) as exc:
+            QtWidgets.QMessageBox.critical(self, "Cannot save scan settings", str(exc))
+            return False
+        assert self.program is not None
+        settings = copy.deepcopy(self._scan_settings_working)
+        self.program = ProcessProgram(stages=self.program.stages, scan_settings=settings)
+        self._mass_names = tuple(mass_stimuli_from_scan_settings(settings))
+        self.mass_plot.configure_series(self._mass_names, MASS_COLORS)
+        self._update_filament(self.program)
+        self._scan_settings_dirty = False
+        self._update_hiden_editor_controls()
+        if announce:
+            self.hiden_editor_status.setText(
+                f"Saved {path.name} atomically — no Hiden command sent"
+            )
+        return True
+
+    def _confirm_leave_hiden_editor(self) -> bool:
+        if not self._scan_settings_dirty:
+            return True
+        answer = QtWidgets.QMessageBox.warning(
+            self,
+            "Unsaved Hiden scan settings",
+            "Save the ScanSettings.msdef changes before leaving this screen?",
+            QtWidgets.QMessageBox.Save
+            | QtWidgets.QMessageBox.Discard
+            | QtWidgets.QMessageBox.Cancel,
+            QtWidgets.QMessageBox.Save,
+        )
+        if answer == QtWidgets.QMessageBox.Save:
+            return self._save_hiden_settings(announce=False)
+        if answer == QtWidgets.QMessageBox.Discard:
+            self._scan_settings_working = None
+            self._scan_settings_dirty = False
+            return True
+        return False
+
     def _choose_program(self) -> None:
         chosen = QtWidgets.QFileDialog.getExistingDirectory(
             self,
@@ -726,6 +1444,8 @@ class SpecMassWindow(QtWidgets.QMainWindow):
         self.runtime = None
         self._program_duration = sum(stage.effective_duration_seconds() for stage in program.stages)
         self._mass_names = tuple(mass_stimuli_from_scan_settings(program.scan_settings))
+        self._scan_settings_working = None
+        self._scan_settings_dirty = False
 
         resolved = str(path.resolve())
         self.program_label.setText(path.name)
@@ -746,6 +1466,7 @@ class SpecMassWindow(QtWidgets.QMainWindow):
         self._build_flow_channels(flow_count)
         self._update_filament(program)
         self._update_device_states()
+        self._refresh_program_config()
         self._update_controls()
 
     def _start(self) -> None:
@@ -966,8 +1687,10 @@ class SpecMassWindow(QtWidgets.QMainWindow):
 
     def _update_controls(self) -> None:
         if self.monitor_backend is not None:
-            self.load_button.setEnabled(False)
+            self.load_button.setEnabled(True)
             self.details_button.setEnabled(False)
+            self.open_program_button.setEnabled(False)
+            self.environment_scan_button.setEnabled(False)
             self.start_button.setEnabled(False)
             self.stop_button.setEnabled(False)
             self.continue_button.setEnabled(False)
@@ -985,10 +1708,20 @@ class SpecMassWindow(QtWidgets.QMainWindow):
             and self.controller.current_stage.temperature_mode is TemperatureMode.ISOTHERMAL
         )
         can_continue = bool(status and status.waiting_for_confirmation) or can_force
-        self.load_button.setEnabled(not self._running)
-        self.details_button.setEnabled(self.program is not None)
+        on_dashboard = self.page_stack.currentWidget() is self.dashboard_page
+        self.load_button.setEnabled(True)
+        self.details_button.setEnabled(not self._running)
+        self.open_program_button.setEnabled(not self._running)
+        self.environment_scan_button.setEnabled(
+            bool(self.program and not self._running)
+        )
         self.start_button.setEnabled(
-            bool(self.program and state is MSMState.READY_FOR_START and not self._running)
+            bool(
+                self.program
+                and state is MSMState.READY_FOR_START
+                and not self._running
+                and on_dashboard
+            )
         )
         self.stop_button.setEnabled(self._running)
         self.continue_button.setEnabled(can_continue)
@@ -1041,6 +1774,9 @@ class SpecMassWindow(QtWidgets.QMainWindow):
             self.telemetry = None
 
     def closeEvent(self, event: QtGui.QCloseEvent) -> None:
+        if not self._confirm_leave_hiden_editor():
+            event.ignore()
+            return
         self.tick_timer.stop()
         self.monitor_timer.stop()
         if self.monitor_backend is not None:
@@ -1128,6 +1864,7 @@ def main() -> int:
         monitor_backend=monitor_backend,
         monitor_telemetry=monitor_telemetry,
         monitor_output=args.monitor_output,
+        builds_directory=args.builds,
     )
     window.show()
     if args.monitor_duration is not None:

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import os
 import re
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -21,6 +23,32 @@ def loads_legacy_json(text: str) -> Any:
 
 def load_legacy_json(path: str | Path) -> Any:
     return loads_legacy_json(Path(path).read_text(encoding="utf-8-sig"))
+
+
+def save_legacy_json(path: str | Path, value: Any) -> None:
+    """Atomically write JSON that remains readable by the legacy application."""
+    destination = Path(path)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    payload = json.dumps(value, indent=4, ensure_ascii=False, allow_nan=False) + "\n"
+    temporary_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            newline="\n",
+            dir=destination.parent,
+            prefix=f".{destination.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as temporary:
+            temporary.write(payload)
+            temporary.flush()
+            os.fsync(temporary.fileno())
+            temporary_path = Path(temporary.name)
+        os.replace(temporary_path, destination)
+    finally:
+        if temporary_path is not None and temporary_path.exists():
+            temporary_path.unlink()
 
 
 def load_program(directory: str | Path) -> ProcessProgram:

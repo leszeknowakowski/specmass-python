@@ -27,6 +27,16 @@ _STOP_BITS = {
 }
 
 
+DEFAULT_HIDEN_MASS_NAMES: dict[float, str] = {
+    4.0: "He",
+    18.0: "H2O",
+    28.0: "N2",
+    32.0: "O2",
+    40.0: "Ar",
+    44.0: "CO2",
+}
+
+
 @dataclass(frozen=True, slots=True)
 class HidenMassDefinition:
     mass: float
@@ -220,6 +230,63 @@ class HidenScanPlan:
             filament=str(data.get("Filament", "")).upper(),
             scans=tuple(HidenScanDefinition.from_mapping(item) for item in raw_scans),
         )
+
+
+def new_hiden_mass_scan(
+    mass: float,
+    *,
+    input_device: str = "SEM",
+    use_autozero: bool = False,
+    autorange_high: int = -7,
+    autorange_low: int = -9,
+    start_range: int = -9,
+    dwell_percent: int = 100,
+    settle_percent: int = 100,
+) -> dict[str, Any]:
+    """Create one legacy-compatible, single-mass scan definition."""
+    scan: dict[str, Any] = {
+        "Device to scan": "mass",
+        "Start value": float(mass),
+        "Stop value": float(mass),
+        "Increment": 1.0,
+        "Relative  sensitivity": 1.0,
+        "Relative gain": 1.0,
+        "Scan mode": 1,
+        "Input device": str(input_device),
+        "Dwell (%)": int(dwell_percent),
+        "Settle (%)": int(settle_percent),
+        "Autorange High": int(autorange_high),
+        "Autorange Low": int(autorange_low),
+        "Start range": int(start_range),
+        "Use Autozero": bool(use_autozero),
+        "Options": "",
+        "Changes to environment parameters": "",
+        "Acquisition cycles": 0,
+        "Min cycle time (sec)": 0.0,
+    }
+    HidenScanDefinition.from_mapping(scan)
+    return scan
+
+
+def hiden_scan_label(
+    scan: Mapping[str, Any],
+    *,
+    names_by_mass: Mapping[float, str] | None = None,
+) -> str:
+    """Return a compact operator-facing label without losing scan details."""
+    definition = HidenScanDefinition.from_mapping(scan)
+    if definition.device_to_scan.casefold() == "mass":
+        if definition.is_single_point:
+            mass = definition.start_value
+            names = DEFAULT_HIDEN_MASS_NAMES if names_by_mass is None else names_by_mass
+            name = names.get(mass, f"Mass {mass:g}")
+            target = f"{name}  —  m/z {mass:g}"
+        else:
+            target = f"Mass sweep  —  {definition.start_value:g} to {definition.stop_value:g}"
+    else:
+        target = definition.device_to_scan
+    autozero = " · autozero" if definition.use_autozero else ""
+    return f"{target}  ·  {definition.input_device}{autozero}"
 
 
 def load_hiden_connection(builds_directory: str | Path) -> HidenConnectionConfig:

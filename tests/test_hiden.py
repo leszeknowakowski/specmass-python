@@ -6,6 +6,8 @@ from specmass.hiden import (
     HidenConnectionConfig,
     HidenScanPlan,
     build_hiden_offline_report,
+    hiden_scan_label,
+    new_hiden_mass_scan,
 )
 
 
@@ -58,6 +60,18 @@ def scan(mass: float, *, autozero: bool = False) -> dict:
 
 
 class HidenOfflineTests(unittest.TestCase):
+    def test_new_mass_scan_matches_legacy_shape_and_has_operator_label(self):
+        definition = new_hiden_mass_scan(18, use_autozero=True)
+        plan = HidenScanPlan.from_mapping(
+            {"Filament": "F1", "ScansParameters": [definition]}
+        )
+        self.assertEqual(plan.scans[0].start_value, 18.0)
+        self.assertEqual(plan.scans[0].stop_value, 18.0)
+        self.assertEqual(
+            hiden_scan_label(definition),
+            "H2O  —  m/z 18  ·  SEM · autozero",
+        )
+
     def test_deployed_connection_normalizes_ni_visa_enums(self):
         config = HidenConnectionConfig.from_mapping(DEPLOYED_CONNECTION)
         self.assertEqual(config.resource, "COM3")

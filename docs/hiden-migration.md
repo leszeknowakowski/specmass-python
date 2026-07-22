@@ -62,6 +62,20 @@ identity. The report recorded one identity query and zero initialization,
 standby, filament, scan or other state-change commands. A postflight process
 check confirmed that the one-shot Python process had exited and released COM3.
 
+## Offline scan editor
+
+The PyQt5 GUI now mirrors the LabVIEW monitor, stage-configuration, and Hiden
+environment/scan screens. The Hiden screen can add and remove single-mass SEM
+or Faraday definitions and explicitly save the selected program's
+`ScanSettings.msdef`. It validates the same typed `HidenScanPlan` used by the
+offline report, preserves unknown top-level settings, writes atomically, and
+prompts before discarding unsaved changes.
+
+This editor has no serial client or device-upload callback. The displayed
+environment values are a read-only reference snapshot and the **Upload to
+device** button is disabled. The saved identity is labeled with a tooltip that
+states that opening the screen does not repeat the COM3 identity query.
+
 ## Next controlled milestone
 
 The identity milestone is complete. Actual mass acquisition is a later

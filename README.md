@@ -80,6 +80,31 @@ Then run it with:
 python -m specmass.ui --program "D:\path\to\program-folder"
 ```
 
+The header now follows the LabVIEW three-screen workflow:
+
+1. **Monitor screen** shows the live/simulated dashboard and plots.
+2. **Config screen** shows the selected program's stages, temperature settings,
+   valves, and Brooks flow settings. Stage values are read-only in this
+   migration step.
+3. **Environment and scan configuration** is the offline Hiden scan editor.
+   Select the large `+` button to add a single-mass SEM or Faraday scan, select
+   a row and use `−` to remove it, then explicitly select
+   **Save ScanSettings.msdef**.
+
+The scan editor preserves the legacy JSON field names, validates the complete
+scan plan, and atomically replaces only the selected program folder's
+`ScanSettings.msdef`. Unsaved changes require Save or Discard before leaving.
+Opening the screen, adding/removing masses, and saving do not open COM3. The
+environment-parameter table is read-only and **Upload to device** is visibly
+disabled until Hiden write commands have been implemented and validated.
+
+Optionally supply `--builds` with a simulated program to resolve the configured
+mass names from the copied `Builds/data/MSDevTh` file. This is file-only access:
+
+```powershell
+python -m specmass.ui --program "D:\path\to\program-folder" --builds "D:\_SpecMass\Builds"
+```
+
 The default red-banner mode uses `SimulatedBackend` and cannot open serial or
 TCP connections. A separate, explicitly enabled ADAM-4118 monitor mode can open
 COM14 for temperature reads only; it cannot run a program or apply an actuator
