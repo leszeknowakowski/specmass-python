@@ -222,6 +222,19 @@ class ConfigurationGuiTests(unittest.TestCase):
         )
         self.assertEqual(existing.read_text(encoding="utf-8"), "keep")
 
+    def test_cooling_wait_can_be_disabled_before_start(self):
+        self.assertTrue(self.window.wait_for_cooling_check.isChecked())
+        self.assertEqual(self.window._configured_cooling_temperature(), 50.0)
+
+        self.window.wait_for_cooling_check.setChecked(False)
+        self.assertFalse(self.window.cooling_spin.isEnabled())
+        self.assertIsNone(self.window._configured_cooling_temperature())
+
+        self.window.wait_for_cooling_check.setChecked(True)
+        self.window.cooling_spin.setValue(75.0)
+        self.assertTrue(self.window.cooling_spin.isEnabled())
+        self.assertEqual(self.window._configured_cooling_temperature(), 75.0)
+
 
 if __name__ == "__main__":
     unittest.main()

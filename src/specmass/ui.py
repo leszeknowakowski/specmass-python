@@ -1420,14 +1420,22 @@ class SpecMassWindow(QtWidgets.QMainWindow):
         self.follow_check = QtWidgets.QCheckBox("Follow live plots")
         self.follow_check.setChecked(True)
         self.follow_check.toggled.connect(self._set_follow_live)
+        self.wait_for_cooling_check = QtWidgets.QCheckBox("Wait for cooling")
+        self.wait_for_cooling_check.setChecked(True)
+        self.wait_for_cooling_check.setToolTip(
+            "Keep monitoring and logging with safe outputs until the furnace "
+            "reaches the cooling threshold. This choice is captured at START."
+        )
         self.cooling_spin = QtWidgets.QDoubleSpinBox()
         self.cooling_spin.setRange(-50.0, 1200.0)
         self.cooling_spin.setValue(50.0)
         self.cooling_spin.setSuffix(" °C")
+        self.wait_for_cooling_check.toggled.connect(self.cooling_spin.setEnabled)
         layout.addWidget(run_label)
         layout.addWidget(self.output_label, 1)
         layout.addWidget(self.follow_check)
         layout.addSpacing(18)
+        layout.addWidget(self.wait_for_cooling_check)
         layout.addWidget(QtWidgets.QLabel("Cooling threshold:"))
         layout.addWidget(self.cooling_spin)
         return footer
@@ -2381,7 +2389,7 @@ class SpecMassWindow(QtWidgets.QMainWindow):
         ):
             return
         try:
-            self.controller.cooling_temperature = self.cooling_spin.value()
+            self.controller.cooling_temperature = self._configured_cooling_temperature()
             self.controller.start(0.0)
         except Exception as exc:
             QtWidgets.QMessageBox.critical(self, "Cannot start", str(exc))
@@ -2418,6 +2426,11 @@ class SpecMassWindow(QtWidgets.QMainWindow):
         self._update_device_states()
         self._update_controls()
         self.tick_timer.start()
+
+    def _configured_cooling_temperature(self) -> float | None:
+        if not self.wait_for_cooling_check.isChecked():
+            return None
+        return self.cooling_spin.value()
 
     def _tick(self) -> None:
         if not self._running or self.runtime is None or self.controller is None:
@@ -2609,6 +2622,7 @@ class SpecMassWindow(QtWidgets.QMainWindow):
             self.apply_flows_button.setEnabled(False)
             self.flow_mode_box.setEnabled(False)
             self.flow_value_spin.setEnabled(False)
+            self.wait_for_cooling_check.setEnabled(False)
             self.cooling_spin.setEnabled(False)
             return
         state = self.controller.state if self.controller else MSMState.IDLE
@@ -2640,6 +2654,10 @@ class SpecMassWindow(QtWidgets.QMainWindow):
         self.stop_button.setEnabled(self._running)
         self.continue_button.setEnabled(can_continue)
         self.apply_flows_button.setEnabled(self.program is not None)
+        self.wait_for_cooling_check.setEnabled(not self._running)
+        self.cooling_spin.setEnabled(
+            not self._running and self.wait_for_cooling_check.isChecked()
+        )
         self._update_stage_editor_controls()
         self._update_hiden_editor_controls()
 

@@ -101,6 +101,10 @@ The header now follows the LabVIEW three-screen workflow:
 Simulation `.tdms` output (or `.csv` when `nptdms` is unavailable) is created
 directly in the loaded program folder with a timestamped, non-overwriting name.
 This keeps the stage definitions, scan settings, and run output together.
+**Wait for cooling** is enabled by default: after the final stage, safe outputs
+remain active while plotting and logging continue down to the selected cooling
+threshold. Uncheck it before START to close the run immediately after the safe
+stop sequence instead.
 
 The scan editor preserves the legacy JSON field names, validates the complete
 scan plan, and atomically replaces only the selected program folder's
