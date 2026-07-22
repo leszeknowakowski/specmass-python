@@ -188,3 +188,26 @@ TDMS preserves the legacy `Temperature/Temperature`,
 exact elapsed and UTC time channels. Close the GUI normally to finalize a TDMS
 file. For a bounded unattended check, `--monitor-duration 60` closes the monitor
 normally after one minute.
+
+## Offline Hiden scan inspection
+
+The Hiden migration currently stops before mass-spectrometer control. The
+deployed connection and a program's `ScanSettings.msdef` can be parsed and
+validated without opening COM3:
+
+```bat
+python -m specmass.hiden --builds "D:\_SpecMass\Builds" --program "D:\path\to\program" --output "hiden-offline.json"
+```
+
+The report normalizes the legacy NI-VISA serial enums, lists every scan and
+resolved mass label, and records explicit zero-I/O counters. The supplied real
+program contains six single-point SEM scans at masses 18, 28, 30, 32, 44 and
+46 using filament F1.
+
+Mass acquisition is not a passive read. The Hiden scan driver selects an
+operating mode, sets scan and detector parameters, controls the ion beam, and
+may change detector range. A separately gated inventory option contains only
+the isolated `pget name` identity query, with no initialization or scan API,
+but it must not be run on COM3 until a dedicated live-test step is agreed.
+See `docs/hiden-migration.md` for the command boundary reconstructed from the
+copied driver.

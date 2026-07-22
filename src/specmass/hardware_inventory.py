@@ -11,6 +11,7 @@ from typing import Any, Callable, Iterable
 
 from .devices.adam4118 import Adam4118Client, Adam4118Codec
 from .devices.brooks0254 import Brooks0254Codec
+from .devices.hiden import HidenIdentityCodec, HidenIdentityReadOnlyClient
 from .devices.serial_transport import PySerialTransaction, SerialSettings, SerialTransaction
 from .legacy import load_legacy_json
 
@@ -280,6 +281,48 @@ def _escaped_ascii(raw: bytes) -> str:
     )
 
 
+def probe_hiden_identity_read_only(
+    device: ConfiguredDevice,
+    *,
+    transaction_factory: Callable[[SerialSettings], SerialTransaction] | None = None,
+) -> dict[str, Any]:
+    """Send only `pget name`; never initialize, select a mode, or start a scan."""
+    if device.thread_name != "MSDevTh":
+        raise ValueError("Read-only Hiden identity probe needs the MSDevTh configuration")
+    if not device.configured_port or not device.baudrate:
+        raise ValueError("Hiden port and baud rate must be configured")
+    settings = SerialSettings(
+        port=device.configured_port,
+        baudrate=device.baudrate,
+        timeout_seconds=1.0,
+        write_timeout_seconds=1.0,
+        read_terminator=b"\r",
+    )
+    factory = transaction_factory or (
+        lambda serial_settings: PySerialTransaction(serial_settings, hardware_enabled=True)
+    )
+    transport = factory(settings)
+    request = HidenIdentityCodec.identity_command()
+    try:
+        client = HidenIdentityReadOnlyClient(transport)
+        identity = client.read_identity()
+        return {
+            "status": "ok",
+            "port": device.configured_port,
+            "baudrate": device.baudrate,
+            "request": request.decode("ascii").replace("\r", "\\r"),
+            "identity": identity,
+            "identity_queries": 1,
+            "initialization_commands": 0,
+            "standby_commands": 0,
+            "filament_commands": 0,
+            "scan_commands": 0,
+            "state_change_commands": 0,
+        }
+    finally:
+        transport.close()
+
+
 def probe_adam4118_read_only(
     device: ConfiguredDevice,
     *,
@@ -392,12 +435,19 @@ def main() -> int:
         help="also send one ADAM-4118 read-all-analog-input query",
     )
     parser.add_argument(
+        "--probe-hiden-identity",
+        action="store_true",
+        help="also send the isolated Hiden `pget name` identity query only",
+    )
+    parser.add_argument(
         "--allow-read-queries",
         action="store_true",
         help="explicitly permit read-only serial query frames; never permits setpoint/output writes",
     )
     args = parser.parse_args()
-    if (args.probe_brooks or args.probe_adam4118) and not args.allow_read_queries:
+    if (
+        args.probe_brooks or args.probe_adam4118 or args.probe_hiden_identity
+    ) and not args.allow_read_queries:
         parser.error("read-only probes require --allow-read-queries")
 
     report = build_report(args.builds)
@@ -444,6 +494,32 @@ def main() -> int:
                     "setpoint_writes": 0,
                 }
 
+    if args.probe_hiden_identity:
+        hiden = next(
+            (
+                ConfiguredDevice(**device)
+                for device in report["configured_devices"]
+                if device["thread_name"] == "MSDevTh"
+            ),
+            None,
+        )
+        if hiden is None:
+            report["hiden_identity_read_only_probe"] = {"status": "not-configured"}
+        else:
+            try:
+                report["hiden_identity_read_only_probe"] = probe_hiden_identity_read_only(hiden)
+            except Exception as exc:
+                report["hiden_identity_read_only_probe"] = {
+                    "status": "error",
+                    "error_type": type(exc).__name__,
+                    "message": str(exc),
+                    "initialization_commands": 0,
+                    "standby_commands": 0,
+                    "filament_commands": 0,
+                    "scan_commands": 0,
+                    "state_change_commands": 0,
+                }
+
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
     print(f"Hardware inventory written to {args.output.resolve()}")
@@ -453,7 +529,9 @@ def main() -> int:
         print(f"Brooks read-only probe: {report['brooks_read_only_probe']['status']}")
     if args.probe_adam4118:
         print(f"ADAM-4118 read-only probe: {report['adam4118_read_only_probe']['status']}")
-    if not args.probe_brooks and not args.probe_adam4118:
+    if args.probe_hiden_identity:
+        print(f"Hiden identity-only probe: {report['hiden_identity_read_only_probe']['status']}")
+    if not args.probe_brooks and not args.probe_adam4118 and not args.probe_hiden_identity:
         print("No serial port was opened and no device query was sent.")
     return 0
 

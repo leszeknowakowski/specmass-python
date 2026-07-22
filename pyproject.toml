@@ -24,6 +24,7 @@ specmass-sim = "specmass.cli:main"
 specmass-ui = "specmass.ui:main"
 specmass-validate = "specmass.validate_cli:main"
 specmass-hardware-inventory = "specmass.hardware_inventory:main"
+specmass-hiden-offline = "specmass.hiden:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

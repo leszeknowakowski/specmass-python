@@ -144,3 +144,18 @@ The read-only ADAM-4118 codec now implements the documented `#AAN` single-input
 and `#AA` all-input commands and strict engineering-unit response parsing. The
 guarded inventory CLI can issue one all-input query only with both
 `--probe-adam4118` and `--allow-read-queries`; it contains no ADAM output API.
+
+## Hiden offline reconstruction
+
+The deployed `MSDevTh` connection and `ScanSettings.msdef` now have typed,
+validated Python models and a zero-I/O report command. The supplied recipe was
+validated as six single-point SEM scans at masses 18, 28, 30, 32, 44 and 46
+using F1, with autozero only on the first point.
+
+Offline extraction of temporary copies of the bundled Hiden VIs established
+that normal scan and partial-pressure acquisition change operating mode,
+devices, ion-beam state and potentially detector range. It therefore cannot be
+added to the existing passive hardware monitor. Only the isolated `pget name`
+identity query has been implemented, in a client with no initialization or
+state-changing method; it remains untested on COM3 pending a separate live-test
+decision. Detailed evidence is in `docs/hiden-migration.md`.
