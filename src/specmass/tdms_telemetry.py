@@ -20,11 +20,17 @@ class TdmsTelemetryWriter:
         mass_stimuli: Mapping[str, float] | None = None,
         nominal_increment_seconds: float = 0.1,
         run_name: str | None = None,
+        temperature_names: tuple[str, ...] = ("Temperature",),
+        root_properties: Mapping[str, Any] | None = None,
     ) -> None:
         if flow_channels < 0:
             raise ValueError("Flow channel count cannot be negative")
         if nominal_increment_seconds <= 0:
             raise ValueError("Nominal TDMS increment must be positive")
+        if not temperature_names or len(set(temperature_names)) != len(temperature_names):
+            raise ValueError("Temperature channel names must be non-empty and unique")
+        if "Setpoint" in temperature_names:
+            raise ValueError("Setpoint is reserved for the temperature command channel")
         if importlib.util.find_spec("nptdms") is None:
             raise RuntimeError(
                 "TDMS logging needs the optional dependency: pip install 'specmass[tdms]'"
@@ -34,9 +40,11 @@ class TdmsTelemetryWriter:
         self.mass_stimuli = dict(mass_stimuli or {})
         self.nominal_increment_seconds = float(nominal_increment_seconds)
         self.run_name = run_name or self.path.stem
+        self.temperature_names = temperature_names
+        self.root_properties = dict(root_properties or {})
         self._started_utc = datetime.now(timezone.utc)
         self._elapsed: list[float] = []
-        self._temperatures: list[float] = []
+        self._temperatures: list[list[float]] = [[] for _ in temperature_names]
         self._setpoints: list[float] = []
         self._heater: list[float] = []
         self._states: list[int] = []
@@ -53,7 +61,13 @@ class TdmsTelemetryWriter:
             raise RuntimeError("Cannot write to a closed TDMS logger")
         row_index = len(self._elapsed)
         self._elapsed.append(float(snapshot.timestamp))
-        self._temperatures.append(float(snapshot.temperature))
+        incoming_temperatures = snapshot.temperatures or (snapshot.temperature,)
+        for index, values in enumerate(self._temperatures):
+            values.append(
+                float(incoming_temperatures[index])
+                if index < len(incoming_temperatures)
+                else float("nan")
+            )
         self._setpoints.append(
             float("nan") if command.temperature_setpoint is None else float(command.temperature_setpoint)
         )
@@ -107,16 +121,16 @@ class TdmsTelemetryWriter:
             "wf_xunit_string": "s",
             "SpecMass_ExplicitTimeChannel": "/'Time'/'ElapsedSeconds'",
         }
-        objects = [
-            RootObject(
-                {
-                    "name": self.run_name,
-                    "SpecMass_FormatVersion": "1.0",
-                    "SpecMass_TimebaseNote": (
-                        "Use Time/ElapsedSeconds for exact acquisition times; wf_increment is nominal."
-                    ),
-                }
+        root_properties = {
+            "name": self.run_name,
+            "SpecMass_FormatVersion": "1.0",
+            "SpecMass_TimebaseNote": (
+                "Use Time/ElapsedSeconds for exact acquisition times; wf_increment is nominal."
             ),
+            **self.root_properties,
+        }
+        objects = [
+            RootObject(root_properties),
             GroupObject("Time"),
             ChannelObject("Time", "ElapsedSeconds", np.asarray(self._elapsed, dtype=np.float64)),
             ChannelObject(
@@ -126,11 +140,14 @@ class TdmsTelemetryWriter:
                 {"unit_string": "seconds since Unix epoch UTC"},
             ),
             GroupObject("Temperature"),
-            ChannelObject(
-                "Temperature",
-                "Temperature",
-                np.asarray(self._temperatures, dtype=np.float64),
-                dict(waveform_properties, NI_ChannelName="Temperature"),
+            *(
+                ChannelObject(
+                    "Temperature",
+                    name,
+                    np.asarray(values, dtype=np.float64),
+                    dict(waveform_properties, NI_ChannelName=name),
+                )
+                for name, values in zip(self.temperature_names, self._temperatures)
             ),
             ChannelObject(
                 "Temperature",

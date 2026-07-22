@@ -117,6 +117,11 @@ explicit PyQt5 hardware-monitor mode. The GUI shows both temperature channels
 and all four measured flows, while the monitor's Brooks client exposes no
 setpoint operation and its backend rejects every control command.
 
+Optional monitor logging now records both real temperature channels and all
+four real Brooks inputs to CSV or TDMS. The TDMS hierarchy preserves the legacy
+temperature/flow paths but uses explicit elapsed and UTC time channels, avoiding
+the invalid mass-waveform timebase found in the supplied LabVIEW run.
+
 ## Instrument inventory correction
 
 The zero-I/O report made on the instrument computer shows that its active Hiden

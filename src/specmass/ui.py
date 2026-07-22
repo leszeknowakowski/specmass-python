@@ -12,6 +12,7 @@ import pyqtgraph as pg
 from PyQt5 import QtCore, QtGui, QtWidgets
 
 from .devices.adam4118 import Adam4118Client, Adam4118MonitorBackend
+from .devices.base import ControlCommand
 from .devices.brooks0254 import Brooks0254ReadOnlyClient
 from .devices.read_only_monitor import ReadOnlyHardwareMonitorBackend
 from .devices.serial_transport import PySerialTransaction, SerialSettings
@@ -21,8 +22,8 @@ from .models import ProcessProgram, TemperatureMode
 from .pid import PIDController, PIDGains
 from .runtime import SpecMassRuntime
 from .safety import SafetyPolicy
-from .state_machine import MSMState, ProcessController
-from .telemetry import CsvTelemetryWriter
+from .state_machine import ControllerStatus, MSMState, ProcessController
+from .telemetry import CsvTelemetryWriter, TelemetryWriter
 from .tdms_telemetry import TdmsTelemetryWriter, mass_stimuli_from_scan_settings
 
 
@@ -102,6 +103,37 @@ def _create_hardware_monitor(builds_directory: Path) -> ReadOnlyHardwareMonitorB
     except Exception:
         temperature_monitor.safe_shutdown()
         raise
+
+
+def _create_monitor_telemetry(
+    path: Path,
+    monitor_backend: Adam4118MonitorBackend | ReadOnlyHardwareMonitorBackend,
+) -> TelemetryWriter:
+    if path.exists():
+        raise FileExistsError(f"Refusing to overwrite existing monitor log: {path}")
+    temperature_names = tuple(monitor_backend.channel_names)
+    flow_count = len(tuple(getattr(monitor_backend, "flow_channel_names", ())))
+    suffix = path.suffix.lower()
+    if suffix == ".csv":
+        return CsvTelemetryWriter(
+            path,
+            flow_channels=flow_count,
+            temperature_names=temperature_names,
+        )
+    if suffix == ".tdms":
+        return TdmsTelemetryWriter(
+            path,
+            flow_channels=flow_count,
+            nominal_increment_seconds=(
+                int(getattr(monitor_backend, "poll_interval_ms", 1000)) / 1000.0
+            ),
+            temperature_names=temperature_names,
+            root_properties={
+                "SpecMass_Mode": "ReadOnlyHardwareMonitor",
+                "SpecMass_OutputCommandsEnabled": 0,
+            },
+        )
+    raise ValueError("Monitor log name must end with .csv or .tdms")
 
 
 def _format_elapsed(seconds: float) -> str:
@@ -260,6 +292,8 @@ class SpecMassWindow(QtWidgets.QMainWindow):
         *,
         initial_program: Path | None = None,
         monitor_backend: Adam4118MonitorBackend | ReadOnlyHardwareMonitorBackend | None = None,
+        monitor_telemetry: TelemetryWriter | None = None,
+        monitor_output: Path | None = None,
     ) -> None:
         super().__init__()
         self.setWindowTitle("Mass Spectrometer Station — SpecMass Python simulator")
@@ -271,8 +305,9 @@ class SpecMassWindow(QtWidgets.QMainWindow):
         self.backend: SimulatedBackend | None = None
         self.controller: ProcessController | None = None
         self.runtime: SpecMassRuntime | None = None
-        self.telemetry: CsvTelemetryWriter | TdmsTelemetryWriter | None = None
+        self.telemetry: TelemetryWriter | None = monitor_telemetry
         self.monitor_backend = monitor_backend
+        self.monitor_output = monitor_output
         self._monitor_error = False
         self._monitor_started_monotonic = 0.0
         self._running = False
@@ -601,6 +636,10 @@ class SpecMassWindow(QtWidgets.QMainWindow):
         self.heater_label.setText("Disabled")
         self.remaining_label.setText("—")
         self.output_label.setText("Read-only; no actuator output")
+        if self.monitor_output is not None:
+            resolved_output = str(self.monitor_output.resolve())
+            self.output_label.setText(self.monitor_output.name)
+            self.output_label.setToolTip(resolved_output)
         self.temperature_plot.configure_series(
             self.monitor_backend.channel_names,
             ("#111111", "#df3e3e"),
@@ -624,13 +663,35 @@ class SpecMassWindow(QtWidgets.QMainWindow):
         timestamp = time.monotonic() - self._monitor_started_monotonic
         try:
             snapshot = self.monitor_backend.read(timestamp)
+            if self.telemetry is not None:
+                flow_count = len(snapshot.flows)
+                self.telemetry.write(
+                    snapshot,
+                    ControlCommand.safe(
+                        flow_count=flow_count,
+                        flow_write_enabled=(False,) * flow_count,
+                    ),
+                    ControllerStatus(
+                        MSMState.IDLE,
+                        None,
+                        timestamp,
+                        0.0,
+                        False,
+                        False,
+                    ),
+                )
         except Exception as exc:
             self._monitor_error = True
             self.monitor_timer.stop()
+            message = str(exc)
+            try:
+                self._close_telemetry()
+            except Exception as close_exc:
+                message = f"{message}\nAdditionally, closing the monitor log failed: {close_exc}"
             self.monitor_backend.safe_shutdown()
-            self.status_label.setText("Read Error")
+            self.status_label.setText("Read/Log Error")
             self._update_device_states(error=True)
-            QtWidgets.QMessageBox.critical(self, "Hardware monitor read error", str(exc))
+            QtWidgets.QMessageBox.critical(self, "Hardware monitor error", message)
             return
         values = snapshot.temperatures or (snapshot.temperature,)
         self.temperature_label.setText(" / ".join(f"{value:.2f} °C" for value in values))
@@ -1008,6 +1069,11 @@ def main() -> int:
     )
     parser.add_argument("--builds", type=Path, help="folder containing MassSpec.exe and data")
     parser.add_argument(
+        "--monitor-output",
+        type=Path,
+        help="optional new .csv or .tdms file for read-only monitor samples",
+    )
+    parser.add_argument(
         "--allow-read-hardware",
         action="store_true",
         help="explicitly permit read-only ADAM4118 and/or Brooks serial queries",
@@ -1020,6 +1086,8 @@ def main() -> int:
         parser.error("a hardware monitor requires --allow-read-hardware")
     if monitor_requested and args.program is not None:
         parser.error("a hardware monitor cannot be combined with --program")
+    if args.monitor_output is not None and not monitor_requested:
+        parser.error("--monitor-output requires --temperature-monitor or --hardware-monitor")
 
     QtWidgets.QApplication.setAttribute(QtCore.Qt.AA_EnableHighDpiScaling, True)
     QtWidgets.QApplication.setAttribute(QtCore.Qt.AA_UseHighDpiPixmaps, True)
@@ -1028,18 +1096,28 @@ def main() -> int:
     application.setApplicationName("SpecMass Python")
     application.setStyle("Fusion")
     monitor_backend = None
+    monitor_telemetry = None
     if monitor_requested:
         try:
             if args.hardware_monitor:
                 monitor_backend = _create_hardware_monitor(args.builds)
             else:
                 monitor_backend = _create_adam4118_monitor(args.builds)
+            if args.monitor_output is not None:
+                monitor_telemetry = _create_monitor_telemetry(
+                    args.monitor_output,
+                    monitor_backend,
+                )
         except Exception as exc:
+            if monitor_backend is not None:
+                monitor_backend.safe_shutdown()
             QtWidgets.QMessageBox.critical(None, "Cannot configure hardware monitor", str(exc))
             return 2
     window = SpecMassWindow(
         initial_program=args.program,
         monitor_backend=monitor_backend,
+        monitor_telemetry=monitor_telemetry,
+        monitor_output=args.monitor_output,
     )
     window.show()
     return int(application.exec_())

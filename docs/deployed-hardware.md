@@ -131,3 +131,9 @@ flows together using `--hardware-monitor --allow-read-hardware`. It polls COM14
 and COM13 approximately once per second. The flow reader is a separate
 `Brooks0254ReadOnlyClient` with no setpoint API, the combined backend rejects
 every control command, and all actuator widgets remain disabled.
+
+The monitor accepts an optional `--monitor-output` path ending in `.csv` or
+`.tdms`. It refuses to overwrite an existing file. CSV is flushed per sample;
+TDMS retains the legacy temperature and flow group/channel paths and adds exact
+`Time/ElapsedSeconds` and `Time/UtcSeconds` channels. TDMS root properties mark
+the session as `ReadOnlyHardwareMonitor` and output commands as disabled.

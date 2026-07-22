@@ -167,3 +167,23 @@ python -m specmass.ui --hardware-monitor --builds "D:\_SpecMass\Builds" --allow-
 The combined monitor reads COM14 and COM13 approximately once per second. Its
 Brooks client has no setpoint method, and the shared backend rejects all heater,
 valve, and flow commands. Do not run it concurrently with LabVIEW.
+
+Add a new output filename to record the same live samples. Existing files are
+never overwritten:
+
+```bat
+python -m specmass.ui --hardware-monitor --builds "D:\_SpecMass\Builds" --allow-read-hardware --monitor-output "D:\specmass-python-git\monitor_20260722.csv"
+```
+
+CSV rows are flushed after every sample. For a TDMS log, install the optional
+dependency and use a `.tdms` filename:
+
+```bat
+python -m pip install -e ".[tdms]"
+python -m specmass.ui --hardware-monitor --builds "D:\_SpecMass\Builds" --allow-read-hardware --monitor-output "D:\specmass-python-git\monitor_20260722.tdms"
+```
+
+TDMS preserves the legacy `Temperature/Temperature`,
+`Temperature/Temperature2`, and `Flows/Ch0` through `Ch3` paths while adding
+exact elapsed and UTC time channels. Close the GUI normally to finalize a TDMS
+file.
