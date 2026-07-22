@@ -11,7 +11,7 @@ try:
 
     from specmass.hiden import new_hiden_mass_scan
     from specmass.legacy import load_legacy_json
-    from specmass.ui import SpecMassWindow
+    from specmass.ui import MassScanDialog, SpecMassWindow
 except ImportError:
     QtWidgets = None
 
@@ -86,6 +86,47 @@ class ConfigurationGuiTests(unittest.TestCase):
             [18.0, 44.0],
         )
         self.assertFalse(self.window._scan_settings_dirty)
+
+    def test_scan_dialog_matches_labview_tabs_and_linear_detector_fields(self):
+        dialog = MassScanDialog(initial_mass=18)
+        self.addCleanup(dialog.close)
+        self.assertEqual(
+            [dialog.tabs.tabText(index) for index in range(dialog.tabs.count())],
+            ["Environment", "Scan", "Detector", "Advanced"],
+        )
+        self.assertFalse(dialog.environment_change_button.isEnabled())
+        self.assertEqual(
+            [dialog.input_device_box.itemText(index) for index in range(dialog.input_device_box.count())],
+            list(MassScanDialog.INPUT_DEVICES),
+        )
+
+        trend = dialog.scan_definition()
+        self.assertEqual((trend["Start value"], trend["Stop value"]), (18.0, 18.0))
+        self.assertEqual(trend["Input device"], "SEM")
+        self.assertEqual(trend["Autorange Low"], -13)
+
+        dialog.scan_type_box.setCurrentText("linear")
+        dialog.scan_start_spin.setValue(0.4)
+        dialog.scan_stop_spin.setValue(200.0)
+        dialog.scan_step_spin.setValue(0.01)
+        dialog.continuous_scan_check.setChecked(False)
+        dialog.acquisition_cycles_spin.setValue(4)
+        dialog.input_device_box.setCurrentText("auxiliary2")
+        dialog.relative_sensitivity_spin.setValue(1.5)
+        dialog.relative_gain_spin.setValue(2.0)
+        dialog.options_edit.setText("option")
+        dialog.environment_changes_edit.setPlainText("environment")
+        linear = dialog.scan_definition()
+        self.assertEqual(
+            (linear["Start value"], linear["Stop value"], linear["Increment"]),
+            (0.4, 200.0, 0.01),
+        )
+        self.assertEqual(linear["Input device"], "auxiliary2")
+        self.assertEqual(linear["Acquisition cycles"], 4)
+        self.assertEqual(linear["Relative  sensitivity"], 1.5)
+        self.assertEqual(linear["Relative gain"], 2.0)
+        self.assertEqual(linear["Options"], "option")
+        self.assertEqual(linear["Changes to environment parameters"], "environment")
 
 
 if __name__ == "__main__":

@@ -72,6 +72,35 @@ class HidenOfflineTests(unittest.TestCase):
             "H2O  —  m/z 18  ·  SEM · autozero",
         )
 
+    def test_linear_scan_factory_preserves_all_editor_fields(self):
+        definition = new_hiden_mass_scan(
+            0.4,
+            stop_mass=200.0,
+            increment=0.01,
+            input_device="Faraday",
+            autorange_high=-5,
+            autorange_low=-12,
+            start_range=-7,
+            dwell_percent=80,
+            settle_percent=20,
+            relative_sensitivity=1.25,
+            relative_gain=0.75,
+            options="raw options",
+            environment_changes="raw environment",
+            acquisition_cycles=3,
+            minimum_cycle_time_seconds=0.5,
+        )
+        parsed = HidenScanPlan.from_mapping(
+            {"Filament": "F1", "ScansParameters": [definition]}
+        ).scans[0]
+        self.assertFalse(parsed.is_single_point)
+        self.assertEqual((parsed.start_value, parsed.stop_value), (0.4, 200.0))
+        self.assertEqual(parsed.increment, 0.01)
+        self.assertEqual(parsed.input_device, "Faraday")
+        self.assertEqual(parsed.acquisition_cycles, 3)
+        self.assertEqual(parsed.options, "raw options")
+        self.assertEqual(parsed.environment_changes, "raw environment")
+
     def test_deployed_connection_normalizes_ni_visa_enums(self):
         config = HidenConnectionConfig.from_mapping(DEPLOYED_CONNECTION)
         self.assertEqual(config.resource, "COM3")

@@ -320,7 +320,23 @@ class TrendPlot(pg.PlotWidget):
 
 
 class MassScanDialog(QtWidgets.QDialog):
-    """Offline editor for one single-point Hiden mass scan."""
+    """Offline LabVIEW-style editor for one Hiden mass scan."""
+
+    INPUT_DEVICES = (
+        "Faraday",
+        "SEM",
+        "Total",
+        "auxiliary1",
+        "auxiliary2",
+        "0V",
+        "test",
+        "scanV",
+        "monitor1",
+        "monitor2",
+        "monitor3",
+        "nul-dev",
+        "none",
+    )
 
     def __init__(
         self,
@@ -329,71 +345,303 @@ class MassScanDialog(QtWidgets.QDialog):
         initial_mass: float = 18.0,
     ) -> None:
         super().__init__(parent)
-        self.setWindowTitle("Add Hiden mass scan")
+        self.setWindowTitle("Scan editor: new scan")
         self.setModal(True)
-        self.setMinimumWidth(430)
+        self.resize(680, 520)
+        self.setMinimumSize(600, 470)
         layout = QtWidgets.QVBoxLayout(self)
 
         explanation = QtWidgets.QLabel(
-            "This adds a definition to ScanSettings.msdef only. "
-            "It does not communicate with the Hiden instrument."
+            "Offline scan definition editor — Done returns settings to the program editor; "
+            "no Hiden command is sent."
         )
         explanation.setWordWrap(True)
         explanation.setObjectName("muted")
         layout.addWidget(explanation)
 
-        form = QtWidgets.QFormLayout()
-        self.mass_spin = QtWidgets.QDoubleSpinBox()
-        self.mass_spin.setRange(0.01, 1000.0)
-        self.mass_spin.setDecimals(4)
-        self.mass_spin.setValue(initial_mass)
-        self.mass_spin.setSuffix(" m/z")
-        form.addRow("Mass", self.mass_spin)
+        editing_row = QtWidgets.QHBoxLayout()
+        editing_row.addStretch(1)
+        editing_row.addWidget(QtWidgets.QLabel("Editing Scan"))
+        self.editing_scan_spin = QtWidgets.QSpinBox()
+        self.editing_scan_spin.setRange(1, 1)
+        self.editing_scan_spin.setValue(1)
+        self.editing_scan_spin.setEnabled(False)
+        editing_row.addWidget(self.editing_scan_spin)
+        layout.addLayout(editing_row)
 
-        self.input_device_box = QtWidgets.QComboBox()
-        self.input_device_box.addItems(("SEM", "Faraday"))
-        form.addRow("Input device", self.input_device_box)
-
-        self.autozero_check = QtWidgets.QCheckBox("Use autozero for this scan")
-        form.addRow("", self.autozero_check)
-
-        self.autorange_high_spin = QtWidgets.QSpinBox()
-        self.autorange_low_spin = QtWidgets.QSpinBox()
-        self.start_range_spin = QtWidgets.QSpinBox()
-        for spin in (
-            self.autorange_high_spin,
-            self.autorange_low_spin,
-            self.start_range_spin,
-        ):
-            spin.setRange(-15, 5)
-        self.autorange_high_spin.setValue(-7)
-        self.autorange_low_spin.setValue(-9)
-        self.start_range_spin.setValue(-9)
-        form.addRow("Autorange high", self.autorange_high_spin)
-        form.addRow("Autorange low", self.autorange_low_spin)
-        form.addRow("Start range", self.start_range_spin)
-
-        self.dwell_spin = QtWidgets.QSpinBox()
-        self.settle_spin = QtWidgets.QSpinBox()
-        for spin in (self.dwell_spin, self.settle_spin):
-            spin.setRange(0, 100)
-            spin.setValue(100)
-            spin.setSuffix(" %")
-        form.addRow("Dwell", self.dwell_spin)
-        form.addRow("Settle", self.settle_spin)
-        layout.addLayout(form)
+        self.tabs = QtWidgets.QTabWidget()
+        self.tabs.addTab(self._build_environment_tab(), "Environment")
+        self.tabs.addTab(self._build_scan_tab(initial_mass), "Scan")
+        self.tabs.addTab(self._build_detector_tab(), "Detector")
+        self.tabs.addTab(self._build_advanced_tab(), "Advanced")
+        layout.addWidget(self.tabs, 1)
 
         buttons = QtWidgets.QDialogButtonBox(
             QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel
         )
-        buttons.button(QtWidgets.QDialogButtonBox.Ok).setText("Add mass")
+        buttons.button(QtWidgets.QDialogButtonBox.Ok).setText("Done")
+        buttons.button(QtWidgets.QDialogButtonBox.Cancel).setText("Abort")
         buttons.accepted.connect(self._validate_and_accept)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
 
+        self._scan_type_changed(self.scan_type_box.currentText())
+        self._continuous_scan_changed(self.continuous_scan_check.isChecked())
+        self._update_detector_range_label()
+
+    def _build_environment_tab(self) -> QtWidgets.QWidget:
+        tab = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout(tab)
+        top = QtWidgets.QHBoxLayout()
+        mode_form = QtWidgets.QFormLayout()
+        self.environment_global_mode = QtWidgets.QComboBox()
+        self.environment_global_mode.addItem("RGA")
+        self.environment_global_mode.setEnabled(False)
+        mode_form.addRow("Global mode", self.environment_global_mode)
+        top.addLayout(mode_form)
+        top.addStretch(1)
+        layout.addLayout(top)
+
+        layout.addWidget(QtWidgets.QLabel("Global mode parameters"))
+        self.environment_parameter_table = QtWidgets.QTableWidget(
+            len(HIDEN_ENVIRONMENT_PARAMETERS), 3
+        )
+        self.environment_parameter_table.setHorizontalHeaderLabels(
+            ("Parameter", "Value", "Description")
+        )
+        self.environment_parameter_table.setEditTriggers(
+            QtWidgets.QAbstractItemView.NoEditTriggers
+        )
+        self.environment_parameter_table.setSelectionBehavior(
+            QtWidgets.QAbstractItemView.SelectRows
+        )
+        for row, values in enumerate(HIDEN_ENVIRONMENT_PARAMETERS):
+            for column, value in enumerate(values):
+                self.environment_parameter_table.setItem(
+                    row, column, QtWidgets.QTableWidgetItem(value)
+                )
+        header = self.environment_parameter_table.horizontalHeader()
+        header.setSectionResizeMode(0, QtWidgets.QHeaderView.Stretch)
+        header.setSectionResizeMode(1, QtWidgets.QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(2, QtWidgets.QHeaderView.Stretch)
+        self.environment_parameter_table.setCurrentCell(0, 0)
+        layout.addWidget(self.environment_parameter_table, 1)
+
+        change_row = QtWidgets.QHBoxLayout()
+        change_row.addStretch(1)
+        change_row.addWidget(QtWidgets.QLabel("New value"))
+        self.environment_new_value = QtWidgets.QDoubleSpinBox()
+        self.environment_new_value.setRange(-1_000_000.0, 1_000_000.0)
+        self.environment_new_value.setDecimals(4)
+        self.environment_new_value.setEnabled(False)
+        change_row.addWidget(self.environment_new_value)
+        self.environment_change_button = QtWidgets.QPushButton("Change")
+        self.environment_change_button.setEnabled(False)
+        self.environment_change_button.setToolTip(
+            "Global environment values belong to the live Hiden I/O-device state, "
+            "not ScanSettings.msdef. Device editing remains disabled."
+        )
+        change_row.addWidget(self.environment_change_button)
+        layout.addLayout(change_row)
+        note = QtWidgets.QLabel(
+            "Reference snapshot only. The LabVIEW driver returns these as global device "
+            "values, so Python will not pretend to save or upload them as a scan."
+        )
+        note.setObjectName("muted")
+        note.setWordWrap(True)
+        layout.addWidget(note)
+        return tab
+
+    def _build_scan_tab(self, initial_mass: float) -> QtWidgets.QWidget:
+        tab = QtWidgets.QWidget()
+        grid = QtWidgets.QGridLayout(tab)
+        grid.setColumnStretch(4, 1)
+
+        self.scan_mode_box = QtWidgets.QComboBox()
+        self.scan_mode_box.addItem("RGA", 1)
+        self.scan_mode_box.setEnabled(False)
+        grid.addWidget(QtWidgets.QLabel("Scan mode"), 0, 0)
+        grid.addWidget(self.scan_mode_box, 0, 1)
+
+        self.scan_type_box = QtWidgets.QComboBox()
+        self.scan_type_box.addItems(("trend", "linear"))
+        self.scan_type_box.currentTextChanged.connect(self._scan_type_changed)
+        grid.addWidget(QtWidgets.QLabel("Scan type"), 1, 0)
+        grid.addWidget(self.scan_type_box, 1, 1)
+
+        self.scan_parameter_box = QtWidgets.QComboBox()
+        self.scan_parameter_box.addItem("mass")
+        self.scan_parameter_box.setEnabled(False)
+        grid.addWidget(QtWidgets.QLabel("Scan parameter"), 2, 0)
+        grid.addWidget(self.scan_parameter_box, 2, 1)
+        self.scan_start_relation_label = QtWidgets.QLabel("at")
+        grid.addWidget(self.scan_start_relation_label, 2, 2)
+        self.scan_start_spin = QtWidgets.QDoubleSpinBox()
+        self.scan_start_spin.setRange(0.4, 200.0)
+        self.scan_start_spin.setDecimals(4)
+        self.scan_start_spin.setValue(min(200.0, max(0.4, initial_mass)))
+        self.scan_start_spin.setSuffix(" amu")
+        grid.addWidget(self.scan_start_spin, 2, 3)
+
+        self.scan_limits_label = QtWidgets.QLabel("Limits 0.4 to 200.0 amu")
+        self.scan_limits_label.setObjectName("muted")
+        grid.addWidget(self.scan_limits_label, 3, 1, 1, 3)
+
+        self.scan_stop_relation_label = QtWidgets.QLabel("to")
+        self.scan_stop_spin = QtWidgets.QDoubleSpinBox()
+        self.scan_stop_spin.setRange(0.4, 200.0)
+        self.scan_stop_spin.setDecimals(4)
+        self.scan_stop_spin.setValue(200.0)
+        self.scan_stop_spin.setSuffix(" amu")
+        grid.addWidget(self.scan_stop_relation_label, 4, 2)
+        grid.addWidget(self.scan_stop_spin, 4, 3)
+
+        self.scan_step_relation_label = QtWidgets.QLabel("with step")
+        self.scan_step_spin = QtWidgets.QDoubleSpinBox()
+        self.scan_step_spin.setRange(0.0001, 200.0)
+        self.scan_step_spin.setDecimals(4)
+        self.scan_step_spin.setValue(0.01)
+        self.scan_step_spin.setSuffix(" amu")
+        grid.addWidget(self.scan_step_relation_label, 5, 2)
+        grid.addWidget(self.scan_step_spin, 5, 3)
+
+        self.continuous_scan_check = QtWidgets.QCheckBox("Continuous scan")
+        self.continuous_scan_check.setChecked(True)
+        self.continuous_scan_check.toggled.connect(self._continuous_scan_changed)
+        grid.addWidget(self.continuous_scan_check, 7, 0, 1, 2)
+        grid.addWidget(QtWidgets.QLabel("Acquisition cycles"), 6, 2)
+        self.acquisition_cycles_spin = QtWidgets.QSpinBox()
+        self.acquisition_cycles_spin.setRange(0, 1_000_000)
+        self.acquisition_cycles_spin.setValue(0)
+        grid.addWidget(self.acquisition_cycles_spin, 7, 2)
+        grid.addWidget(QtWidgets.QLabel("Min cycle time (s)"), 6, 3)
+        self.minimum_cycle_time_spin = QtWidgets.QDoubleSpinBox()
+        self.minimum_cycle_time_spin.setRange(0.0, 86_400.0)
+        self.minimum_cycle_time_spin.setDecimals(3)
+        self.minimum_cycle_time_spin.setValue(0.0)
+        grid.addWidget(self.minimum_cycle_time_spin, 7, 3)
+        grid.setRowStretch(8, 1)
+        return tab
+
+    def _build_detector_tab(self) -> QtWidgets.QWidget:
+        tab = QtWidgets.QWidget()
+        grid = QtWidgets.QGridLayout(tab)
+        grid.setColumnStretch(5, 1)
+
+        grid.addWidget(QtWidgets.QLabel("Input device"), 0, 0)
+        self.input_device_box = QtWidgets.QComboBox()
+        self.input_device_box.addItems(self.INPUT_DEVICES)
+        self.input_device_box.setCurrentText("SEM")
+        grid.addWidget(self.input_device_box, 0, 1)
+        self.detector_range_label = QtWidgets.QLabel()
+        self.detector_range_label.setObjectName("muted")
+        grid.addWidget(self.detector_range_label, 1, 1, 1, 2)
+        self.autozero_check = QtWidgets.QCheckBox("Use Autozero")
+        grid.addWidget(self.autozero_check, 0, 3, 1, 2)
+
+        self.start_range_spin = QtWidgets.QSpinBox()
+        self.autorange_high_spin = QtWidgets.QSpinBox()
+        self.autorange_low_spin = QtWidgets.QSpinBox()
+        for spin in (
+            self.start_range_spin,
+            self.autorange_high_spin,
+            self.autorange_low_spin,
+        ):
+            spin.setRange(-15, 5)
+            spin.valueChanged.connect(self._update_detector_range_label)
+        self.start_range_spin.setValue(-7)
+        self.autorange_high_spin.setValue(-7)
+        self.autorange_low_spin.setValue(-13)
+        grid.addWidget(QtWidgets.QLabel("Start range"), 2, 0)
+        grid.addWidget(self.start_range_spin, 2, 1)
+        grid.addWidget(QtWidgets.QLabel("Autorange high"), 3, 0)
+        grid.addWidget(self.autorange_high_spin, 3, 1)
+        grid.addWidget(QtWidgets.QLabel("Autorange low"), 4, 0)
+        grid.addWidget(self.autorange_low_spin, 4, 1)
+
+        self.settle_spin = QtWidgets.QSpinBox()
+        self.dwell_spin = QtWidgets.QSpinBox()
+        for spin in (self.settle_spin, self.dwell_spin):
+            spin.setRange(0, 100)
+            spin.setValue(100)
+            spin.setSuffix(" %")
+        grid.addWidget(QtWidgets.QLabel("Settle"), 2, 2)
+        grid.addWidget(self.settle_spin, 2, 3)
+        grid.addWidget(QtWidgets.QLabel("Dwell"), 3, 2)
+        grid.addWidget(self.dwell_spin, 3, 3)
+
+        self.relative_sensitivity_spin = QtWidgets.QDoubleSpinBox()
+        self.relative_gain_spin = QtWidgets.QDoubleSpinBox()
+        for spin in (self.relative_sensitivity_spin, self.relative_gain_spin):
+            spin.setRange(0.0001, 1_000_000.0)
+            spin.setDecimals(4)
+            spin.setValue(1.0)
+        grid.addWidget(QtWidgets.QLabel("Relative sensitivity"), 2, 4)
+        grid.addWidget(self.relative_sensitivity_spin, 2, 5)
+        grid.addWidget(QtWidgets.QLabel("Relative SEM"), 3, 4)
+        grid.addWidget(self.relative_gain_spin, 3, 5)
+        grid.setRowStretch(5, 1)
+        return tab
+
+    def _build_advanced_tab(self) -> QtWidgets.QWidget:
+        tab = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout(tab)
+        form = QtWidgets.QFormLayout()
+        self.options_edit = QtWidgets.QLineEdit()
+        self.environment_changes_edit = QtWidgets.QPlainTextEdit()
+        self.environment_changes_edit.setMaximumHeight(120)
+        self.environment_changes_edit.setPlaceholderText(
+            "Raw legacy sset env payload; normally leave empty"
+        )
+        form.addRow("Options", self.options_edit)
+        form.addRow("Changes to environment parameters", self.environment_changes_edit)
+        layout.addLayout(form)
+        note = QtWidgets.QLabel(
+            "These map directly to the two legacy scan fields. They are saved to the "
+            "program definition only and are not transmitted to the instrument."
+        )
+        note.setObjectName("muted")
+        note.setWordWrap(True)
+        layout.addWidget(note)
+        layout.addStretch(1)
+        return tab
+
+    def _scan_type_changed(self, scan_type: str) -> None:
+        linear = scan_type == "linear"
+        self.scan_start_relation_label.setText("from" if linear else "at")
+        for widget in (
+            self.scan_stop_relation_label,
+            self.scan_stop_spin,
+            self.scan_step_relation_label,
+            self.scan_step_spin,
+        ):
+            widget.setVisible(linear)
+
+    def _continuous_scan_changed(self, continuous: bool) -> None:
+        self.acquisition_cycles_spin.setEnabled(not continuous)
+        if continuous:
+            self.acquisition_cycles_spin.setValue(0)
+        elif self.acquisition_cycles_spin.value() == 0:
+            self.acquisition_cycles_spin.setValue(1)
+
+    def _update_detector_range_label(self, ignored: int | None = None) -> None:
+        del ignored
+        self.detector_range_label.setText(
+            f"Configured range {self.autorange_low_spin.value()} "
+            f"to {self.autorange_high_spin.value()}"
+        )
+
     def scan_definition(self) -> dict[str, Any]:
+        linear = self.scan_type_box.currentText() == "linear"
+        start = self.scan_start_spin.value()
+        stop = self.scan_stop_spin.value() if linear else start
+        if linear and stop <= start:
+            raise ValueError("A linear mass scan requires 'to' to be greater than 'from'")
         return new_hiden_mass_scan(
-            self.mass_spin.value(),
+            start,
+            stop_mass=stop,
+            increment=self.scan_step_spin.value() if linear else 1.0,
+            scan_mode=int(self.scan_mode_box.currentData()),
             input_device=self.input_device_box.currentText(),
             use_autozero=self.autozero_check.isChecked(),
             autorange_high=self.autorange_high_spin.value(),
@@ -401,6 +649,15 @@ class MassScanDialog(QtWidgets.QDialog):
             start_range=self.start_range_spin.value(),
             dwell_percent=self.dwell_spin.value(),
             settle_percent=self.settle_spin.value(),
+            relative_sensitivity=self.relative_sensitivity_spin.value(),
+            relative_gain=self.relative_gain_spin.value(),
+            options=self.options_edit.text(),
+            environment_changes=self.environment_changes_edit.toPlainText(),
+            acquisition_cycles=(
+                0 if self.continuous_scan_check.isChecked()
+                else self.acquisition_cycles_spin.value()
+            ),
+            minimum_cycle_time_seconds=self.minimum_cycle_time_spin.value(),
         )
 
     def _validate_and_accept(self) -> None:
@@ -809,7 +1066,7 @@ class SpecMassWindow(QtWidgets.QMainWindow):
         self.add_mass_button = QtWidgets.QPushButton("+")
         self.add_mass_button.setObjectName("roundAction")
         self.add_mass_button.setFixedSize(64, 64)
-        self.add_mass_button.setToolTip("Add a single-mass scan")
+        self.add_mass_button.setToolTip("Add a trend or linear mass scan")
         self.add_mass_button.clicked.connect(self._add_hiden_mass)
         self.remove_mass_button = QtWidgets.QPushButton("−")
         self.remove_mass_button.setObjectName("roundAction")

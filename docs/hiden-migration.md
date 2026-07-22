@@ -65,16 +65,24 @@ check confirmed that the one-shot Python process had exited and released COM3.
 ## Offline scan editor
 
 The PyQt5 GUI now mirrors the LabVIEW monitor, stage-configuration, and Hiden
-environment/scan screens. The Hiden screen can add and remove single-mass SEM
-or Faraday definitions and explicitly save the selected program's
-`ScanSettings.msdef`. It validates the same typed `HidenScanPlan` used by the
-offline report, preserves unknown top-level settings, writes atomically, and
-prompts before discarding unsaved changes.
+environment/scan screens. Its new-scan dialog mirrors the four LabVIEW tabs:
+Environment, Scan, Detector, and Advanced. It supports trend and linear mass
+scans, the full detector list shown by the deployed editor, autozero, ranges,
+dwell/settle percentages, relative factors, cycle controls, and the two raw
+legacy advanced fields. The Hiden screen can add and remove these definitions
+and explicitly save the selected program's `ScanSettings.msdef`. It validates
+the same typed `HidenScanPlan` used by the offline report, preserves unknown
+top-level settings, writes atomically, and prompts before discarding unsaved
+changes.
 
 This editor has no serial client or device-upload callback. The displayed
 environment values are a read-only reference snapshot and the **Upload to
 device** button is disabled. The saved identity is labeled with a tooltip that
 states that opening the screen does not repeat the COM3 identity query.
+The copied Hiden manual confirms that Environment-tab edits are returned as
+global mass-spectrometer I/O-device values, separately from the scan array.
+Consequently that tab's Change control remains disabled rather than inventing
+an incompatible `ScanSettings.msdef` representation.
 
 ## Next controlled milestone
 

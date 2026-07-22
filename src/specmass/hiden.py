@@ -235,6 +235,9 @@ class HidenScanPlan:
 def new_hiden_mass_scan(
     mass: float,
     *,
+    stop_mass: float | None = None,
+    increment: float = 1.0,
+    scan_mode: int = 1,
     input_device: str = "SEM",
     use_autozero: bool = False,
     autorange_high: int = -7,
@@ -242,16 +245,23 @@ def new_hiden_mass_scan(
     start_range: int = -9,
     dwell_percent: int = 100,
     settle_percent: int = 100,
+    relative_sensitivity: float = 1.0,
+    relative_gain: float = 1.0,
+    options: str = "",
+    environment_changes: str = "",
+    acquisition_cycles: int = 0,
+    minimum_cycle_time_seconds: float = 0.0,
 ) -> dict[str, Any]:
-    """Create one legacy-compatible, single-mass scan definition."""
+    """Create one legacy-compatible trend or linear mass-scan definition."""
+    stop_value = float(mass if stop_mass is None else stop_mass)
     scan: dict[str, Any] = {
         "Device to scan": "mass",
         "Start value": float(mass),
-        "Stop value": float(mass),
-        "Increment": 1.0,
-        "Relative  sensitivity": 1.0,
-        "Relative gain": 1.0,
-        "Scan mode": 1,
+        "Stop value": stop_value,
+        "Increment": float(increment),
+        "Relative  sensitivity": float(relative_sensitivity),
+        "Relative gain": float(relative_gain),
+        "Scan mode": int(scan_mode),
         "Input device": str(input_device),
         "Dwell (%)": int(dwell_percent),
         "Settle (%)": int(settle_percent),
@@ -259,10 +269,10 @@ def new_hiden_mass_scan(
         "Autorange Low": int(autorange_low),
         "Start range": int(start_range),
         "Use Autozero": bool(use_autozero),
-        "Options": "",
-        "Changes to environment parameters": "",
-        "Acquisition cycles": 0,
-        "Min cycle time (sec)": 0.0,
+        "Options": str(options),
+        "Changes to environment parameters": str(environment_changes),
+        "Acquisition cycles": int(acquisition_cycles),
+        "Min cycle time (sec)": float(minimum_cycle_time_seconds),
     }
     HidenScanDefinition.from_mapping(scan)
     return scan

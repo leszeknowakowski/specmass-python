@@ -87,9 +87,12 @@ The header now follows the LabVIEW three-screen workflow:
    valves, and Brooks flow settings. Stage values are read-only in this
    migration step.
 3. **Environment and scan configuration** is the offline Hiden scan editor.
-   Select the large `+` button to add a single-mass SEM or Faraday scan, select
-   a row and use `−` to remove it, then explicitly select
-   **Save ScanSettings.msdef**.
+   Select the large `+` button to open the LabVIEW-style four-tab editor:
+   **Environment**, **Scan**, **Detector**, and **Advanced**. Scan supports both
+   single-mass trend acquisition and linear from/to/step sweeps. Detector
+   exposes the legacy input-device list, autozero, ranges, dwell, settle,
+   relative sensitivity, and relative gain. Select a row and use `−` to remove
+   it, then explicitly select **Save ScanSettings.msdef**.
 
 The scan editor preserves the legacy JSON field names, validates the complete
 scan plan, and atomically replaces only the selected program folder's
@@ -97,6 +100,11 @@ scan plan, and atomically replaces only the selected program folder's
 Opening the screen, adding/removing masses, and saving do not open COM3. The
 environment-parameter table is read-only and **Upload to device** is visibly
 disabled until Hiden write commands have been implemented and validated.
+The Environment tab in the new-scan dialog is also a read-only reference: the
+copied Hiden manual confirms those values are global live-device state returned
+separately from the scan array. The Advanced tab maps directly to the legacy
+`Options` and `Changes to environment parameters` scan fields without sending
+them anywhere.
 
 Optionally supply `--builds` with a simulated program to resolve the configured
 mass names from the copied `Builds/data/MSDevTh` file. This is file-only access:
