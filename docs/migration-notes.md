@@ -157,5 +157,6 @@ that normal scan and partial-pressure acquisition change operating mode,
 devices, ion-beam state and potentially detector range. It therefore cannot be
 added to the existing passive hardware monitor. Only the isolated `pget name`
 identity query has been implemented, in a client with no initialization or
-state-changing method; it remains untested on COM3 pending a separate live-test
-decision. Detailed evidence is in `docs/hiden-migration.md`.
+state-changing method. The approved one-shot COM3 test returned the expected
+`HAL RC RGA 201 #16359` identity, recorded zero state-changing commands, and
+released the port normally. Detailed evidence is in `docs/hiden-migration.md`.

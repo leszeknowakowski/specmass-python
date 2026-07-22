@@ -9,7 +9,7 @@ from specmass.hardware_inventory import ConfiguredDevice, probe_hiden_identity_r
 
 
 class FakeHidenTransport:
-    def __init__(self, response: bytes = b"HAL RC RGA 201 #16359\r") -> None:
+    def __init__(self, response: bytes = b'"HAL RC RGA 201 #16359"\r') -> None:
         self.response = response
         self.requests: list[bytes] = []
         self.closed = False
@@ -40,7 +40,7 @@ class HidenIdentityTests(unittest.TestCase):
     def test_identity_codec_uses_the_isolated_legacy_query(self):
         self.assertEqual(HidenIdentityCodec.identity_command(), b"pget name\r")
         self.assertEqual(
-            HidenIdentityCodec.parse_identity_response(b"HAL RC RGA 201 #16359\r"),
+            HidenIdentityCodec.parse_identity_response(b'"HAL RC RGA 201 #16359"\r'),
             "HAL RC RGA 201 #16359",
         )
 
@@ -55,7 +55,7 @@ class HidenIdentityTests(unittest.TestCase):
         self.assertEqual(transport.requests, [b"pget name\r"])
 
     def test_errors_and_empty_responses_fail_closed(self):
-        for response in (b"", b"\r", b"Error 5\r", b"HAL\x01RC\r"):
+        for response in (b"", b"\r", b'""\r', b"Error 5\r", b"HAL\x01RC\r"):
             with self.subTest(response=response):
                 with self.assertRaises(HidenProtocolError):
                     HidenIdentityCodec.parse_identity_response(response)

@@ -22,6 +22,10 @@ class HidenIdentityCodec:
             raise HidenProtocolError("Hiden identity response is not ASCII") from exc
         if not text:
             raise HidenProtocolError("Hiden identity response is empty")
+        if len(text) >= 2 and text[0] == text[-1] and text[0] in ("'", '"'):
+            text = text[1:-1].strip()
+        if not text:
+            raise HidenProtocolError("Hiden identity response contains an empty quoted string")
         if any(ord(char) < 32 for char in text):
             raise HidenProtocolError("Hiden identity response contains control characters")
         if text.casefold().startswith(("error", "err ", "err:")):

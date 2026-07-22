@@ -55,17 +55,16 @@ both `--probe-hiden-identity` and `--allow-read-queries` before it can open
 COM3, and its report carries separate zero counters for every state-changing
 command category.
 
-This identity path is implemented and unit-tested but has not been executed on
-the instrument. Do not combine it with the temperature/flow monitor and do not
-run it while LabVIEW or MASsoft owns COM3.
+This identity path was executed once on 22 July 2026 after verifying that
+LabVIEW, MASsoft and the Python monitor were not running. COM3 returned the
+quoted ASCII identity `"HAL RC RGA 201 #16359"`, matching the saved instrument
+identity. The report recorded one identity query and zero initialization,
+standby, filament, scan or other state-change commands. A postflight process
+check confirmed that the one-shot Python process had exited and released COM3.
 
 ## Next controlled milestone
 
-The next live step, if approved, is one bounded `pget name` transaction while
-the old application and MASsoft are closed. A successful response should match
-the saved instrument identity `HAL RC RGA 201 #16359`. Regardless of outcome,
-the port must then be closed without sending initialization or standby.
-
-Actual mass acquisition is a later milestone requiring a reviewed command
-sequence, explicit authorization for mode/filament/SEM changes, a fail-safe
-shutdown procedure, and comparison with a short known-good LabVIEW scan.
+The identity milestone is complete. Actual mass acquisition is a later
+milestone requiring a reviewed command sequence, explicit authorization for
+mode/filament/SEM changes, a fail-safe shutdown procedure, and comparison with
+a short known-good LabVIEW scan.
