@@ -3,6 +3,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import Mock, patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -55,6 +56,7 @@ class ConfigurationGuiTests(unittest.TestCase):
 
     def tearDown(self):
         self.window._scan_settings_dirty = False
+        self.window._stage_settings_dirty = False
         self.window.close()
         self.temporary.cleanup()
 
@@ -127,6 +129,98 @@ class ConfigurationGuiTests(unittest.TestCase):
         self.assertEqual(linear["Relative gain"], 2.0)
         self.assertEqual(linear["Options"], "option")
         self.assertEqual(linear["Changes to environment parameters"], "environment")
+
+    def test_stage_add_copy_remove_and_save_use_recovery_backup(self):
+        self.window._show_program_config()
+        self.window.stage_list.setCurrentRow(0)
+        self.window.stage_duration.setValue(77.0)
+        self.window.stage_pulse_length.setValue(2.5)
+        self.assertEqual(
+            self.window._stage_working[0]["ValvePulseLength"], [2.5, 0.0]
+        )
+
+        self.window._add_stage()
+        self.assertEqual(self.window.stage_list.count(), 2)
+        self.window.stage_list.setCurrentRow(0)
+        self.window._copy_stage()
+        self.assertEqual(self.window.stage_list.count(), 3)
+        self.assertEqual(self.window._stage_working[2]["Duration"], 77.0)
+        self.assertTrue(self.window._save_stage_settings(announce=False))
+        self.assertTrue((self.program_path / "Stage2.msdef").is_file())
+        self.assertTrue((self.program_path / "Stage3.msdef").is_file())
+
+        self.window.stage_list.setCurrentRow(1)
+        with patch.object(
+            QtWidgets.QMessageBox,
+            "question",
+            return_value=QtWidgets.QMessageBox.Yes,
+        ):
+            self.window._remove_stage()
+        self.assertEqual(self.window.stage_list.count(), 2)
+        self.assertTrue(self.window._save_stage_settings(announce=False))
+        self.assertFalse((self.program_path / "Stage2.msdef").exists())
+        self.assertTrue(
+            any(
+                (backup / "removed" / "Stage2.msdef").is_file()
+                for backup in (self.program_path / ".specmass-backup").iterdir()
+            )
+        )
+
+    def test_existing_scan_populates_editor_and_round_trips(self):
+        original = new_hiden_mass_scan(
+            28.0,
+            stop_mass=44.0,
+            increment=0.25,
+            input_device="auxiliary2",
+            use_autozero=True,
+            autorange_high=-5,
+            autorange_low=-13,
+            start_range=-7,
+            dwell_percent=80,
+            settle_percent=60,
+            relative_sensitivity=1.5,
+            relative_gain=2.0,
+            options="option",
+            environment_changes="environment",
+            acquisition_cycles=3,
+            minimum_cycle_time_seconds=0.5,
+        )
+        dialog = MassScanDialog(initial_scan=original, scan_number=4)
+        self.addCleanup(dialog.close)
+
+        self.assertEqual(dialog.editing_scan_spin.value(), 4)
+        self.assertEqual(dialog.scan_type_box.currentText(), "linear")
+        self.assertEqual(dialog.input_device_box.currentText(), "auxiliary2")
+        self.assertEqual(dialog.scan_definition(), original)
+
+    def test_edit_scan_replaces_known_values_and_preserves_unknown_legacy_fields(self):
+        self.window._show_hiden_config()
+        original = self.window._working_scans()[0]
+        original["Legacy extension"] = "keep"
+        changed = new_hiden_mass_scan(44.0, input_device="Faraday")
+        fake_dialog = Mock()
+        fake_dialog.exec_.return_value = QtWidgets.QDialog.Accepted
+        fake_dialog.scan_definition.return_value = changed
+
+        with patch("specmass.ui.MassScanDialog", return_value=fake_dialog):
+            self.window._edit_hiden_scan()
+
+        edited = self.window._working_scans()[0]
+        self.assertEqual(edited["Start value"], 44.0)
+        self.assertEqual(edited["Input device"], "Faraday")
+        self.assertEqual(edited["Legacy extension"], "keep")
+        self.assertTrue(self.window._scan_settings_dirty)
+
+    def test_simulation_output_path_is_inside_program_and_never_overwrites(self):
+        existing = self.program_path / "specmass_sim_20260722_180000.csv"
+        existing.write_text("keep", encoding="utf-8")
+        with patch("specmass.ui.time.strftime", return_value="20260722_180000"):
+            output = self.window._simulation_output_path("csv")
+        self.assertEqual(
+            output,
+            self.program_path / "specmass_sim_20260722_180000_2.csv",
+        )
+        self.assertEqual(existing.read_text(encoding="utf-8"), "keep")
 
 
 if __name__ == "__main__":

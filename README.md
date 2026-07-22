@@ -84,20 +84,28 @@ The header now follows the LabVIEW three-screen workflow:
 
 1. **Monitor screen** shows the live/simulated dashboard and plots.
 2. **Config screen** shows the selected program's stages, temperature settings,
-   valves, and Brooks flow settings. Stage values are read-only in this
-   migration step.
+   valves, and Brooks flow settings. **New program** creates `Stage1.msdef` and
+   `ScanSettings.msdef` in a new or empty operator-chosen folder. Stages can be
+   added, copied, removed, and edited; changes remain pending until **Save
+   program**. Before replacing or removing an existing stage file, Save places
+   a recovery copy below the program's `.specmass-backup` folder.
 3. **Environment and scan configuration** is the offline Hiden scan editor.
    Select the large `+` button to open the LabVIEW-style four-tab editor:
    **Environment**, **Scan**, **Detector**, and **Advanced**. Scan supports both
    single-mass trend acquisition and linear from/to/step sweeps. Detector
    exposes the legacy input-device list, autozero, ranges, dwell, settle,
-   relative sensitivity, and relative gain. Select a row and use `−` to remove
-   it, then explicitly select **Save ScanSettings.msdef**.
+   relative sensitivity, and relative gain. Select a row and use **Edit** (or
+   double-click it) to reopen the populated four-tab editor, or use `−` to
+   remove it, then explicitly select **Save ScanSettings.msdef**.
+
+Simulation `.tdms` output (or `.csv` when `nptdms` is unavailable) is created
+directly in the loaded program folder with a timestamped, non-overwriting name.
+This keeps the stage definitions, scan settings, and run output together.
 
 The scan editor preserves the legacy JSON field names, validates the complete
 scan plan, and atomically replaces only the selected program folder's
 `ScanSettings.msdef`. Unsaved changes require Save or Discard before leaving.
-Opening the screen, adding/removing masses, and saving do not open COM3. The
+Opening the screen, adding/editing/removing masses, and saving do not open COM3. The
 environment-parameter table is read-only and **Upload to device** is visibly
 disabled until Hiden write commands have been implemented and validated.
 The Environment tab in the new-scan dialog is also a read-only reference: the

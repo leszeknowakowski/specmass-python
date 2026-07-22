@@ -58,21 +58,89 @@ def load_program(directory: str | Path) -> ProcessProgram:
 
     settings_path = _find_case_insensitive(root, "ScanSettings.msdef")
     settings = load_legacy_json(settings_path) if settings_path else {}
-    stage_paths = sorted(
-        (
-            path
-            for path in root.iterdir()
-            if path.is_file()
-            and path.suffix.lower() == ".msdef"
-            and path.name.lower() != "scansettings.msdef"
-        ),
-        key=lambda path: _natural_key(path.name),
-    )
+    stage_paths = list_stage_paths(root)
     stages = tuple(
         ProcessStage.from_mapping(load_legacy_json(path), default_name=f"Stage{index}")
         for index, path in enumerate(stage_paths)
     )
     return ProcessProgram(stages=stages, scan_settings=settings)
+
+
+def list_stage_paths(directory: str | Path) -> tuple[Path, ...]:
+    root = Path(directory)
+    if not root.is_dir():
+        raise FileNotFoundError(f"Program folder does not exist: {root}")
+    return tuple(
+        sorted(
+            (
+                path
+                for path in root.iterdir()
+                if path.is_file()
+                and path.suffix.lower() == ".msdef"
+                and path.name.lower() != "scansettings.msdef"
+            ),
+            key=lambda path: _natural_key(path.name),
+        )
+    )
+
+
+def load_stage_documents(
+    directory: str | Path,
+) -> tuple[tuple[Path, dict[str, Any]], ...]:
+    documents: list[tuple[Path, dict[str, Any]]] = []
+    for path in list_stage_paths(directory):
+        value = load_legacy_json(path)
+        if not isinstance(value, dict):
+            raise ValueError(f"Stage definition must be a JSON object: {path}")
+        ProcessStage.from_mapping(value, default_name=path.stem)
+        documents.append((path, value))
+    return tuple(documents)
+
+
+def default_stage_mapping(
+    name: str = "Stage1",
+    *,
+    temperature: float = 20.0,
+    flow_channels: int = 4,
+    valve_channels: int = 2,
+) -> dict[str, Any]:
+    if flow_channels < 0 or valve_channels < 0:
+        raise ValueError("Stage channel counts cannot be negative")
+    return {
+        "Name": str(name),
+        "StartTemp": float(temperature),
+        "EndTemp": float(temperature),
+        "TempMode": "Isothermal",
+        "TempA": 0.0,
+        "StartFlow": [0.0] * flow_channels,
+        "EndFlow": [0.0] * flow_channels,
+        "FlowA": [0.0] * flow_channels,
+        "ValveStates": [0] * valve_channels,
+        "ValvePulseLength": [0.0] * valve_channels,
+        "ValvePulseGap": [0.0] * valve_channels,
+        "ValveMode": ["Const"] * valve_channels,
+        "AutoStart": False,
+        "Duration": 0.0,
+        "StabilizeTemp": False,
+    }
+
+
+def create_program_directory(directory: str | Path) -> Path:
+    """Create a new program only in a new or empty operator-chosen folder."""
+    root = Path(directory)
+    if root.exists():
+        if not root.is_dir():
+            raise NotADirectoryError(f"Program path is not a folder: {root}")
+        if any(root.iterdir()):
+            raise FileExistsError(f"New program folder must be empty: {root}")
+    else:
+        root.mkdir(parents=True)
+    save_legacy_json(root / "Stage1.msdef", default_stage_mapping())
+    save_legacy_json(
+        root / "ScanSettings.msdef",
+        {"Filament": "F1", "ScansParameters": []},
+    )
+    return root
 
 
 def load_configuration(directory: str | Path) -> dict[str, Any]:

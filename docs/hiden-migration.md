@@ -69,11 +69,13 @@ environment/scan screens. Its new-scan dialog mirrors the four LabVIEW tabs:
 Environment, Scan, Detector, and Advanced. It supports trend and linear mass
 scans, the full detector list shown by the deployed editor, autozero, ranges,
 dwell/settle percentages, relative factors, cycle controls, and the two raw
-legacy advanced fields. The Hiden screen can add and remove these definitions
-and explicitly save the selected program's `ScanSettings.msdef`. It validates
-the same typed `HidenScanPlan` used by the offline report, preserves unknown
-top-level settings, writes atomically, and prompts before discarding unsaved
-changes.
+legacy advanced fields. The Hiden screen can add, edit, and remove these
+definitions and explicitly save the selected program's `ScanSettings.msdef`.
+Edit reopens the same four-tab dialog with the selected scan populated and
+preserves unknown legacy fields when applying the known values. The editor
+validates the same typed `HidenScanPlan` used by the offline report, preserves
+unknown top-level settings, writes atomically, and prompts before discarding
+unsaved changes.
 
 This editor has no serial client or device-upload callback. The displayed
 environment values are a read-only reference snapshot and the **Upload to

@@ -2,7 +2,13 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from specmass.legacy import load_legacy_json, load_program, loads_legacy_json, save_legacy_json
+from specmass.legacy import (
+    create_program_directory,
+    load_legacy_json,
+    load_program,
+    loads_legacy_json,
+    save_legacy_json,
+)
 
 
 class LegacyReaderTests(unittest.TestCase):
@@ -38,6 +44,26 @@ class LegacyReaderTests(unittest.TestCase):
             temporary_files = list(path.parent.glob(".ScanSettings.msdef.*.tmp"))
         self.assertEqual(loaded, value)
         self.assertEqual(temporary_files, [])
+
+    def test_create_program_directory_initializes_complete_empty_program(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "new-program"
+            created = create_program_directory(root)
+            program = load_program(created)
+            scan_settings = load_legacy_json(root / "ScanSettings.msdef")
+
+        self.assertEqual(created, root)
+        self.assertEqual([stage.name for stage in program.stages], ["Stage1"])
+        self.assertEqual(len(program.stages[0].start_flows), 4)
+        self.assertEqual(scan_settings, {"Filament": "F1", "ScansParameters": []})
+
+    def test_create_program_directory_refuses_nonempty_folder(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "keep.txt").write_text("operator data", encoding="utf-8")
+            with self.assertRaises(FileExistsError):
+                create_program_directory(root)
+            self.assertEqual((root / "keep.txt").read_text(encoding="utf-8"), "operator data")
 
 
 if __name__ == "__main__":

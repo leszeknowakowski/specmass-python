@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import copy
 import importlib.util
+import shutil
 import sys
 import time
 from collections import deque
@@ -21,13 +22,21 @@ from .devices.serial_transport import PySerialTransaction, SerialSettings
 from .devices.simulated import SimulatedBackend
 from .hiden import (
     DEFAULT_HIDEN_MASS_NAMES,
+    HidenScanDefinition,
     HidenScanPlan,
     hiden_scan_label,
     load_hiden_connection,
     new_hiden_mass_scan,
 )
-from .legacy import load_legacy_json, load_program, save_legacy_json
-from .models import ProcessProgram, TemperatureMode, ValveMode
+from .legacy import (
+    create_program_directory,
+    default_stage_mapping,
+    load_legacy_json,
+    load_program,
+    load_stage_documents,
+    save_legacy_json,
+)
+from .models import ProcessProgram, ProcessStage, TemperatureMode, ValveMode
 from .pid import PIDController, PIDGains
 from .runtime import SpecMassRuntime
 from .safety import SafetyPolicy
@@ -343,9 +352,13 @@ class MassScanDialog(QtWidgets.QDialog):
         parent: QtWidgets.QWidget | None = None,
         *,
         initial_mass: float = 18.0,
+        initial_scan: Mapping[str, Any] | None = None,
+        scan_number: int = 1,
     ) -> None:
         super().__init__(parent)
-        self.setWindowTitle("Scan editor: new scan")
+        self.setWindowTitle(
+            "Scan editor: edit scan" if initial_scan is not None else "Scan editor: new scan"
+        )
         self.setModal(True)
         self.resize(680, 520)
         self.setMinimumSize(600, 470)
@@ -363,8 +376,8 @@ class MassScanDialog(QtWidgets.QDialog):
         editing_row.addStretch(1)
         editing_row.addWidget(QtWidgets.QLabel("Editing Scan"))
         self.editing_scan_spin = QtWidgets.QSpinBox()
-        self.editing_scan_spin.setRange(1, 1)
-        self.editing_scan_spin.setValue(1)
+        self.editing_scan_spin.setRange(scan_number, scan_number)
+        self.editing_scan_spin.setValue(scan_number)
         self.editing_scan_spin.setEnabled(False)
         editing_row.addWidget(self.editing_scan_spin)
         layout.addLayout(editing_row)
@@ -388,6 +401,8 @@ class MassScanDialog(QtWidgets.QDialog):
         self._scan_type_changed(self.scan_type_box.currentText())
         self._continuous_scan_changed(self.continuous_scan_check.isChecked())
         self._update_detector_range_label()
+        if initial_scan is not None:
+            self._load_scan_definition(initial_scan)
 
     def _build_environment_tab(self) -> QtWidgets.QWidget:
         tab = QtWidgets.QWidget()
@@ -631,6 +646,43 @@ class MassScanDialog(QtWidgets.QDialog):
             f"to {self.autorange_high_spin.value()}"
         )
 
+    def _load_scan_definition(self, scan: Mapping[str, Any]) -> None:
+        definition = HidenScanDefinition.from_mapping(scan)
+        self.scan_type_box.setCurrentText(
+            "trend" if definition.is_single_point else "linear"
+        )
+        self.scan_start_spin.setValue(definition.start_value)
+        self.scan_stop_spin.setValue(definition.stop_value)
+        self.scan_step_spin.setValue(abs(definition.increment))
+        mode_index = self.scan_mode_box.findData(definition.scan_mode)
+        if mode_index >= 0:
+            self.scan_mode_box.setCurrentIndex(mode_index)
+
+        input_index = self.input_device_box.findText(definition.input_device)
+        if input_index < 0:
+            self.input_device_box.addItem(definition.input_device)
+            input_index = self.input_device_box.count() - 1
+        self.input_device_box.setCurrentIndex(input_index)
+        self.autozero_check.setChecked(definition.use_autozero)
+        self.autorange_high_spin.setValue(definition.autorange_high)
+        self.autorange_low_spin.setValue(definition.autorange_low)
+        self.start_range_spin.setValue(definition.start_range)
+        self.dwell_spin.setValue(definition.dwell_percent)
+        self.settle_spin.setValue(definition.settle_percent)
+        self.relative_sensitivity_spin.setValue(definition.relative_sensitivity)
+        self.relative_gain_spin.setValue(definition.relative_gain)
+        self.minimum_cycle_time_spin.setValue(
+            definition.minimum_cycle_time_seconds
+        )
+        continuous = definition.acquisition_cycles == 0
+        self.continuous_scan_check.setChecked(continuous)
+        if not continuous:
+            self.acquisition_cycles_spin.setValue(definition.acquisition_cycles)
+        self.options_edit.setText(definition.options)
+        self.environment_changes_edit.setPlainText(definition.environment_changes)
+        self._scan_type_changed(self.scan_type_box.currentText())
+        self._update_detector_range_label()
+
     def scan_definition(self) -> dict[str, Any]:
         linear = self.scan_type_box.currentText() == "linear"
         start = self.scan_start_spin.value()
@@ -665,6 +717,67 @@ class MassScanDialog(QtWidgets.QDialog):
             self.scan_definition()
         except ValueError as exc:
             QtWidgets.QMessageBox.warning(self, "Invalid mass scan", str(exc))
+            return
+        self.accept()
+
+
+class NewProgramDialog(QtWidgets.QDialog):
+    """Choose a new or empty folder for a complete SpecMass program."""
+
+    def __init__(
+        self,
+        parent: QtWidgets.QWidget | None = None,
+        *,
+        initial_directory: Path | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Create new SpecMass program")
+        self.setMinimumWidth(620)
+        layout = QtWidgets.QVBoxLayout(self)
+        explanation = QtWidgets.QLabel(
+            "Choose a new or empty folder. Stage1.msdef, ScanSettings.msdef, "
+            "and future simulation output files will be stored there."
+        )
+        explanation.setWordWrap(True)
+        layout.addWidget(explanation)
+
+        path_row = QtWidgets.QHBoxLayout()
+        self.path_edit = QtWidgets.QLineEdit(
+            str((initial_directory or Path.cwd()).resolve())
+        )
+        path_row.addWidget(self.path_edit, 1)
+        browse_button = QtWidgets.QPushButton("Browse…")
+        browse_button.clicked.connect(self._browse)
+        path_row.addWidget(browse_button)
+        layout.addLayout(path_row)
+
+        buttons = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel
+        )
+        buttons.button(QtWidgets.QDialogButtonBox.Ok).setText("Create program")
+        buttons.accepted.connect(self._accept_if_path_present)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def program_path(self) -> Path:
+        return Path(self.path_edit.text().strip()).expanduser()
+
+    def _browse(self) -> None:
+        current = self.program_path()
+        starting_directory = current if current.is_dir() else current.parent
+        chosen = QtWidgets.QFileDialog.getExistingDirectory(
+            self,
+            "Select new or empty program folder",
+            str(starting_directory),
+        )
+        if chosen:
+            self.path_edit.setText(chosen)
+
+    def _accept_if_path_present(self) -> None:
+        if not self.path_edit.text().strip():
+            QtWidgets.QMessageBox.warning(
+                self, "Program path required", "Choose a folder for the new program."
+            )
             return
         self.accept()
 
@@ -708,6 +821,11 @@ class SpecMassWindow(QtWidgets.QMainWindow):
         self._device_lamps: dict[str, StatusLamp] = {}
         self._scan_settings_working: dict[str, Any] | None = None
         self._scan_settings_dirty = False
+        self._stage_paths: list[Path] = []
+        self._stage_working: list[dict[str, Any]] = []
+        self._removed_stage_paths: set[Path] = set()
+        self._stage_settings_dirty = False
+        self._stage_editor_loading = False
         self._hiden_mass_names = dict(DEFAULT_HIDEN_MASS_NAMES)
         if builds_directory is not None:
             try:
@@ -845,13 +963,11 @@ class SpecMassWindow(QtWidgets.QMainWindow):
         return page
 
     @staticmethod
-    def _read_only_spin(*, suffix: str = "", decimals: int = 3) -> QtWidgets.QDoubleSpinBox:
+    def _stage_spin(*, suffix: str = "", decimals: int = 3) -> QtWidgets.QDoubleSpinBox:
         spin = QtWidgets.QDoubleSpinBox()
         spin.setRange(-1_000_000.0, 1_000_000.0)
         spin.setDecimals(decimals)
         spin.setSuffix(suffix)
-        spin.setReadOnly(True)
-        spin.setButtonSymbols(QtWidgets.QAbstractSpinBox.NoButtons)
         return spin
 
     def _build_program_config_page(self) -> QtWidgets.QWidget:
@@ -866,12 +982,20 @@ class SpecMassWindow(QtWidgets.QMainWindow):
         left.setMaximumWidth(560)
         left_layout = QtWidgets.QVBoxLayout(left)
         toolbar = QtWidgets.QHBoxLayout()
+        self.new_program_button = QtWidgets.QPushButton("New\nprogram")
+        self.new_program_button.setMinimumSize(92, 58)
+        self.new_program_button.clicked.connect(self._create_new_program)
+        toolbar.addWidget(self.new_program_button)
         self.open_program_button = QtWidgets.QPushButton("Open\nprogram folder")
-        self.open_program_button.setMinimumSize(120, 58)
+        self.open_program_button.setMinimumSize(108, 58)
         self.open_program_button.clicked.connect(self._choose_program)
         toolbar.addWidget(self.open_program_button)
+        self.save_program_button = QtWidgets.QPushButton("Save\nprogram")
+        self.save_program_button.setMinimumSize(92, 58)
+        self.save_program_button.clicked.connect(self._save_stage_settings)
+        toolbar.addWidget(self.save_program_button)
         self.stage_table_button = QtWidgets.QPushButton("Stage table")
-        self.stage_table_button.setMinimumSize(100, 58)
+        self.stage_table_button.setMinimumSize(88, 58)
         self.stage_table_button.clicked.connect(self._show_stages)
         toolbar.addWidget(self.stage_table_button)
         toolbar.addStretch(1)
@@ -884,13 +1008,24 @@ class SpecMassWindow(QtWidgets.QMainWindow):
         self.stage_list = QtWidgets.QListWidget()
         self.stage_list.currentRowChanged.connect(self._populate_stage_editor)
         left_layout.addWidget(self.stage_list, 1)
-        note = QtWidgets.QLabel(
-            "Stage values are shown read-only in this migration step. "
-            "Hiden scan definitions can be edited on the next screen."
+        stage_actions = QtWidgets.QHBoxLayout()
+        self.add_stage_button = QtWidgets.QPushButton("+  Add stage")
+        self.add_stage_button.clicked.connect(self._add_stage)
+        self.copy_stage_button = QtWidgets.QPushButton("Copy stage")
+        self.copy_stage_button.clicked.connect(self._copy_stage)
+        self.remove_stage_button = QtWidgets.QPushButton("−  Remove stage")
+        self.remove_stage_button.clicked.connect(self._remove_stage)
+        stage_actions.addWidget(self.add_stage_button)
+        stage_actions.addWidget(self.copy_stage_button)
+        stage_actions.addWidget(self.remove_stage_button)
+        left_layout.addLayout(stage_actions)
+        self.stage_editor_status = QtWidgets.QLabel(
+            "Stage changes remain pending until Save program. Removed stage files "
+            "are retained in a recovery backup when saved."
         )
-        note.setObjectName("muted")
-        note.setWordWrap(True)
-        left_layout.addWidget(note)
+        self.stage_editor_status.setObjectName("muted")
+        self.stage_editor_status.setWordWrap(True)
+        left_layout.addWidget(self.stage_editor_status)
 
         right = QtWidgets.QFrame()
         right.setObjectName("panel")
@@ -900,15 +1035,13 @@ class SpecMassWindow(QtWidgets.QMainWindow):
         temperature_grid = QtWidgets.QGridLayout()
         self.stage_temperature_mode = QtWidgets.QComboBox()
         self.stage_temperature_mode.addItems(("Isothermal", "Polythermal"))
-        self.stage_temperature_mode.setEnabled(False)
-        self.stage_duration = self._read_only_spin(suffix=" s")
-        self.stage_start_temperature = self._read_only_spin(suffix=" °C")
-        self.stage_end_temperature = self._read_only_spin(suffix=" °C")
-        self.stage_temperature_rate = self._read_only_spin(suffix=" °C/min")
+        self.stage_duration = self._stage_spin(suffix=" s")
+        self.stage_duration.setRange(0.0, 100_000_000.0)
+        self.stage_start_temperature = self._stage_spin(suffix=" °C")
+        self.stage_end_temperature = self._stage_spin(suffix=" °C")
+        self.stage_temperature_rate = self._stage_spin(suffix=" °C/min")
         self.stage_auto_start = QtWidgets.QCheckBox("Auto start")
         self.stage_stabilize = QtWidgets.QCheckBox("Stabilize temperature")
-        self.stage_auto_start.setEnabled(False)
-        self.stage_stabilize.setEnabled(False)
         temperature_grid.addWidget(QtWidgets.QLabel("Temperature mode"), 0, 0)
         temperature_grid.addWidget(self.stage_temperature_mode, 1, 0)
         temperature_grid.addWidget(QtWidgets.QLabel("Duration"), 0, 1)
@@ -931,12 +1064,12 @@ class SpecMassWindow(QtWidgets.QMainWindow):
         self.stage_valve_list.currentRowChanged.connect(self._populate_stage_valve)
         device_layout.addWidget(self.stage_valve_list, 1, 0, 4, 1)
         self.stage_valve_state = QtWidgets.QCheckBox("State B (unchecked = A)")
-        self.stage_valve_state.setEnabled(False)
         self.stage_valve_mode = QtWidgets.QComboBox()
         self.stage_valve_mode.addItems(("Constant", "Impulse"))
-        self.stage_valve_mode.setEnabled(False)
-        self.stage_pulse_length = self._read_only_spin(suffix=" s")
-        self.stage_pulse_gap = self._read_only_spin(suffix=" s")
+        self.stage_pulse_length = self._stage_spin(suffix=" s")
+        self.stage_pulse_length.setRange(0.0, 100_000_000.0)
+        self.stage_pulse_gap = self._stage_spin(suffix=" s")
+        self.stage_pulse_gap.setRange(0.0, 100_000_000.0)
         device_layout.addWidget(self.stage_valve_state, 1, 1)
         device_layout.addWidget(QtWidgets.QLabel("Mode"), 2, 1)
         device_layout.addWidget(self.stage_valve_mode, 3, 1)
@@ -949,9 +1082,12 @@ class SpecMassWindow(QtWidgets.QMainWindow):
         self.stage_flow_list = QtWidgets.QListWidget()
         self.stage_flow_list.currentRowChanged.connect(self._populate_stage_flow)
         device_layout.addWidget(self.stage_flow_list, 6, 0, 4, 1)
-        self.stage_start_flow = self._read_only_spin(suffix=" ml/min")
-        self.stage_end_flow = self._read_only_spin(suffix=" ml/min")
-        self.stage_flow_rate = self._read_only_spin(suffix=" ml/min²")
+        self.stage_start_flow = self._stage_spin(suffix=" ml/min")
+        self.stage_start_flow.setRange(0.0, 1_000_000.0)
+        self.stage_end_flow = self._stage_spin(suffix=" ml/min")
+        self.stage_end_flow.setRange(0.0, 1_000_000.0)
+        self.stage_flow_rate = self._stage_spin(suffix=" ml/min²")
+        self.stage_flow_rate.setRange(0.0, 1_000_000.0)
         device_layout.addWidget(QtWidgets.QLabel("Start flow"), 7, 1)
         device_layout.addWidget(self.stage_start_flow, 8, 1)
         device_layout.addWidget(QtWidgets.QLabel("End flow"), 7, 2)
@@ -968,6 +1104,28 @@ class SpecMassWindow(QtWidgets.QMainWindow):
         self.environment_scan_button.setMinimumHeight(46)
         self.environment_scan_button.clicked.connect(self._show_hiden_config)
         right_layout.addWidget(self.environment_scan_button, alignment=QtCore.Qt.AlignHCenter)
+
+        self.stage_temperature_mode.currentIndexChanged.connect(
+            self._capture_stage_scalar_fields
+        )
+        for spin in (
+            self.stage_duration,
+            self.stage_start_temperature,
+            self.stage_end_temperature,
+            self.stage_temperature_rate,
+        ):
+            spin.valueChanged.connect(self._capture_stage_scalar_fields)
+        self.stage_auto_start.toggled.connect(self._capture_stage_scalar_fields)
+        self.stage_stabilize.toggled.connect(self._capture_stage_scalar_fields)
+        self.stage_valve_state.toggled.connect(self._capture_stage_valve_fields)
+        self.stage_valve_mode.currentIndexChanged.connect(
+            self._capture_stage_valve_fields
+        )
+        self.stage_pulse_length.valueChanged.connect(self._capture_stage_valve_fields)
+        self.stage_pulse_gap.valueChanged.connect(self._capture_stage_valve_fields)
+        self.stage_start_flow.valueChanged.connect(self._capture_stage_flow_fields)
+        self.stage_end_flow.valueChanged.connect(self._capture_stage_flow_fields)
+        self.stage_flow_rate.valueChanged.connect(self._capture_stage_flow_fields)
 
         outer.addWidget(left)
         outer.addWidget(right, 1)
@@ -1061,6 +1219,9 @@ class SpecMassWindow(QtWidgets.QMainWindow):
             QtWidgets.QAbstractItemView.SingleSelection
         )
         self.hiden_scan_list.currentRowChanged.connect(self._hiden_scan_selected)
+        self.hiden_scan_list.itemDoubleClicked.connect(
+            lambda ignored: self._edit_hiden_scan()
+        )
         scan_row.addWidget(self.hiden_scan_list, 1)
         actions = QtWidgets.QVBoxLayout()
         self.add_mass_button = QtWidgets.QPushButton("+")
@@ -1068,13 +1229,19 @@ class SpecMassWindow(QtWidgets.QMainWindow):
         self.add_mass_button.setFixedSize(64, 64)
         self.add_mass_button.setToolTip("Add a trend or linear mass scan")
         self.add_mass_button.clicked.connect(self._add_hiden_mass)
+        self.edit_mass_button = QtWidgets.QPushButton("Edit")
+        self.edit_mass_button.setFixedSize(64, 42)
+        self.edit_mass_button.setToolTip("Edit the selected scan")
+        self.edit_mass_button.clicked.connect(self._edit_hiden_scan)
         self.remove_mass_button = QtWidgets.QPushButton("−")
         self.remove_mass_button.setObjectName("roundAction")
         self.remove_mass_button.setFixedSize(64, 64)
         self.remove_mass_button.setToolTip("Remove the selected scan")
         self.remove_mass_button.clicked.connect(self._remove_hiden_scan)
         actions.addWidget(self.add_mass_button)
-        actions.addSpacing(24)
+        actions.addSpacing(14)
+        actions.addWidget(self.edit_mass_button)
+        actions.addSpacing(14)
         actions.addWidget(self.remove_mass_button)
         actions.addStretch(1)
         scan_row.addLayout(actions)
@@ -1294,6 +1461,11 @@ class SpecMassWindow(QtWidgets.QMainWindow):
             and not self._confirm_leave_hiden_editor()
         ):
             return
+        if (
+            self.page_stack.currentWidget() is self.program_config_page
+            and not self._confirm_stage_changes()
+        ):
+            return
         self.page_stack.setCurrentWidget(self.dashboard_page)
         self._update_controls()
 
@@ -1311,6 +1483,7 @@ class SpecMassWindow(QtWidgets.QMainWindow):
         self._update_controls()
 
     def _refresh_program_config(self) -> None:
+        selected_row = self.stage_list.currentRow()
         self.stage_list.blockSignals(True)
         self.stage_list.clear()
         if self.program is None or self.program_path is None:
@@ -1320,29 +1493,54 @@ class SpecMassWindow(QtWidgets.QMainWindow):
             self._populate_stage_editor(-1)
             self.environment_scan_button.setEnabled(False)
             self.stage_table_button.setEnabled(False)
+            self.save_program_button.setEnabled(False)
             return
         resolved = str(self.program_path.resolve())
         self.config_program_path_label.setText(self.program_path.name)
         self.config_program_path_label.setToolTip(resolved)
-        self.stage_list.addItems([stage.name for stage in self.program.stages])
+        self.stage_list.addItems(
+            [str(data.get("Name", path.stem)) for path, data in self._stage_documents()]
+        )
         self.stage_list.blockSignals(False)
         self.environment_scan_button.setEnabled(not self._running)
         self.stage_table_button.setEnabled(True)
-        self.stage_list.setCurrentRow(0)
+        if self._stage_working:
+            self.stage_list.setCurrentRow(
+                min(max(0, selected_row), len(self._stage_working) - 1)
+            )
+        else:
+            self._populate_stage_editor(-1)
+        self._update_stage_editor_controls()
 
-    def _selected_stage(self) -> Any | None:
+    def _stage_documents(self) -> tuple[tuple[Path, dict[str, Any]], ...]:
+        return tuple(zip(self._stage_paths, self._stage_working, strict=True))
+
+    def _selected_stage_data(self) -> dict[str, Any] | None:
         row = self.stage_list.currentRow()
-        if self.program is None or not 0 <= row < len(self.program.stages):
+        if not 0 <= row < len(self._stage_working):
             return None
-        return self.program.stages[row]
+        return self._stage_working[row]
+
+    def _load_stage_editor_documents(self) -> None:
+        if self.program_path is None:
+            self._stage_paths = []
+            self._stage_working = []
+        else:
+            documents = load_stage_documents(self.program_path)
+            self._stage_paths = [path for path, _ in documents]
+            self._stage_working = [copy.deepcopy(data) for _, data in documents]
+        self._removed_stage_paths.clear()
+        self._stage_settings_dirty = False
+
+    @staticmethod
+    def _mapping_values(data: Mapping[str, Any], key: str) -> list[Any]:
+        value = data.get(key, [])
+        return list(value) if isinstance(value, (list, tuple)) else []
 
     def _populate_stage_editor(self, row: int) -> None:
-        stage = (
-            self.program.stages[row]
-            if self.program is not None and 0 <= row < len(self.program.stages)
-            else None
-        )
-        if stage is None:
+        self._stage_editor_loading = True
+        data = self._stage_working[row] if 0 <= row < len(self._stage_working) else None
+        if data is None:
             self.stage_temperature_mode.setCurrentIndex(0)
             for spin in (
                 self.stage_duration,
@@ -1357,65 +1555,443 @@ class SpecMassWindow(QtWidgets.QMainWindow):
             self.stage_flow_list.clear()
             self._populate_stage_valve(-1)
             self._populate_stage_flow(-1)
+            self._stage_editor_loading = False
+            self._update_stage_editor_controls()
             return
+        mode = TemperatureMode.parse(data.get("TempMode", 0))
         self.stage_temperature_mode.setCurrentIndex(
-            0 if stage.temperature_mode is TemperatureMode.ISOTHERMAL else 1
+            0 if mode is TemperatureMode.ISOTHERMAL else 1
         )
-        self.stage_duration.setValue(stage.duration_seconds)
-        self.stage_start_temperature.setValue(stage.start_temperature)
-        self.stage_end_temperature.setValue(stage.end_temperature)
-        self.stage_temperature_rate.setValue(stage.temperature_rate_per_minute)
-        self.stage_auto_start.setChecked(stage.auto_start)
-        self.stage_stabilize.setChecked(stage.stabilize_temperature)
+        self.stage_duration.setValue(float(data.get("Duration", 0.0)))
+        self.stage_start_temperature.setValue(float(data.get("StartTemp", 0.0)))
+        self.stage_end_temperature.setValue(float(data.get("EndTemp", 0.0)))
+        self.stage_temperature_rate.setValue(float(data.get("TempA", 0.0)))
+        self.stage_auto_start.setChecked(bool(data.get("AutoStart", False)))
+        self.stage_stabilize.setChecked(bool(data.get("StabilizeTemp", False)))
 
+        valve_states = self._mapping_values(data, "ValveStates")
         self.stage_valve_list.clear()
         self.stage_valve_list.addItems(
-            [f"VICIActuator/{index + 1}" for index in range(len(stage.valve_initial_states))]
+            [f"VICIActuator/{index + 1}" for index in range(len(valve_states))]
         )
-        if stage.valve_initial_states:
+        if valve_states:
             self.stage_valve_list.setCurrentRow(0)
         else:
             self._populate_stage_valve(-1)
 
+        start_flows = self._mapping_values(data, "StartFlow")
         self.stage_flow_list.clear()
         self.stage_flow_list.addItems(
-            [f"Brooks1/{index}" for index in range(len(stage.start_flows))]
+            [f"Brooks1/{index}" for index in range(len(start_flows))]
         )
-        if stage.start_flows:
+        if start_flows:
             self.stage_flow_list.setCurrentRow(0)
         else:
             self._populate_stage_flow(-1)
+        self._stage_editor_loading = False
+        self._populate_stage_valve(self.stage_valve_list.currentRow())
+        self._populate_stage_flow(self.stage_flow_list.currentRow())
+        self._update_stage_editor_controls()
 
     def _populate_stage_valve(self, row: int) -> None:
-        stage = self._selected_stage()
-        if stage is None or not 0 <= row < len(stage.valve_initial_states):
+        was_loading = self._stage_editor_loading
+        self._stage_editor_loading = True
+        data = self._selected_stage_data()
+        states = self._mapping_values(data or {}, "ValveStates")
+        if data is None or not 0 <= row < len(states):
             self.stage_valve_state.setChecked(False)
             self.stage_valve_mode.setCurrentIndex(0)
             self.stage_pulse_length.setValue(0.0)
             self.stage_pulse_gap.setValue(0.0)
+            self._stage_editor_loading = was_loading
             return
-        self.stage_valve_state.setChecked(stage.valve_initial_states[row])
-        mode = stage.valve_modes[row] if row < len(stage.valve_modes) else ValveMode.CONSTANT
+        modes = self._mapping_values(data, "ValveMode")
+        lengths = self._mapping_values(data, "ValvePulseLength")
+        gaps = self._mapping_values(data, "ValvePulseGap")
+        self.stage_valve_state.setChecked(bool(states[row]))
+        mode = ValveMode.parse(modes[row]) if row < len(modes) else ValveMode.CONSTANT
         self.stage_valve_mode.setCurrentIndex(0 if mode is ValveMode.CONSTANT else 1)
-        length = stage.valve_pulse_lengths[row] if row < len(stage.valve_pulse_lengths) else 0.0
-        gap = stage.valve_pulse_gaps[row] if row < len(stage.valve_pulse_gaps) else 0.0
+        length = float(lengths[row]) if row < len(lengths) else 0.0
+        gap = float(gaps[row]) if row < len(gaps) else 0.0
         self.stage_pulse_length.setValue(length)
         self.stage_pulse_gap.setValue(gap)
+        self._stage_editor_loading = was_loading
 
     def _populate_stage_flow(self, row: int) -> None:
-        stage = self._selected_stage()
-        if stage is None or not 0 <= row < len(stage.start_flows):
+        was_loading = self._stage_editor_loading
+        self._stage_editor_loading = True
+        data = self._selected_stage_data()
+        starts = self._mapping_values(data or {}, "StartFlow")
+        if data is None or not 0 <= row < len(starts):
             self.stage_start_flow.setValue(0.0)
             self.stage_end_flow.setValue(0.0)
             self.stage_flow_rate.setValue(0.0)
+            self._stage_editor_loading = was_loading
             return
-        self.stage_start_flow.setValue(stage.start_flows[row])
-        self.stage_end_flow.setValue(stage.end_flows[row])
-        rate = stage.flow_rates_per_minute[row] if row < len(stage.flow_rates_per_minute) else 0.0
+        ends = self._mapping_values(data, "EndFlow")
+        rates = self._mapping_values(data, "FlowA")
+        self.stage_start_flow.setValue(float(starts[row]))
+        self.stage_end_flow.setValue(float(ends[row]) if row < len(ends) else 0.0)
+        rate = float(rates[row]) if row < len(rates) else 0.0
         self.stage_flow_rate.setValue(rate)
+        self._stage_editor_loading = was_loading
+
+    def _capture_stage_scalar_fields(self, ignored: object = None) -> None:
+        del ignored
+        if self._stage_editor_loading:
+            return
+        data = self._selected_stage_data()
+        if data is None:
+            return
+        data.update(
+            {
+                "TempMode": (
+                    "Isothermal"
+                    if self.stage_temperature_mode.currentIndex() == 0
+                    else "Polythermal"
+                ),
+                "Duration": self.stage_duration.value(),
+                "StartTemp": self.stage_start_temperature.value(),
+                "EndTemp": self.stage_end_temperature.value(),
+                "TempA": self.stage_temperature_rate.value(),
+                "AutoStart": self.stage_auto_start.isChecked(),
+                "StabilizeTemp": self.stage_stabilize.isChecked(),
+            }
+        )
+        self._set_stage_dirty()
+
+    @staticmethod
+    def _set_sequence_item(
+        data: dict[str, Any],
+        key: str,
+        row: int,
+        value: Any,
+        *,
+        default: Any,
+        minimum_length: int = 0,
+    ) -> None:
+        values = SpecMassWindow._mapping_values(data, key)
+        while len(values) < max(row + 1, minimum_length):
+            values.append(default)
+        values[row] = value
+        data[key] = values
+
+    def _capture_stage_valve_fields(self, ignored: object = None) -> None:
+        del ignored
+        if self._stage_editor_loading:
+            return
+        data = self._selected_stage_data()
+        row = self.stage_valve_list.currentRow()
+        if data is None or row < 0:
+            return
+        valve_count = len(self._mapping_values(data, "ValveStates"))
+        self._set_sequence_item(
+            data,
+            "ValveStates",
+            row,
+            int(self.stage_valve_state.isChecked()),
+            default=0,
+            minimum_length=valve_count,
+        )
+        self._set_sequence_item(
+            data,
+            "ValveMode",
+            row,
+            "Const" if self.stage_valve_mode.currentIndex() == 0 else "Impulse",
+            default="Const",
+            minimum_length=valve_count,
+        )
+        self._set_sequence_item(
+            data,
+            "ValvePulseLength",
+            row,
+            self.stage_pulse_length.value(),
+            default=0.0,
+            minimum_length=valve_count,
+        )
+        self._set_sequence_item(
+            data,
+            "ValvePulseGap",
+            row,
+            self.stage_pulse_gap.value(),
+            default=0.0,
+            minimum_length=valve_count,
+        )
+        self._set_stage_dirty()
+
+    def _capture_stage_flow_fields(self, ignored: object = None) -> None:
+        del ignored
+        if self._stage_editor_loading:
+            return
+        data = self._selected_stage_data()
+        row = self.stage_flow_list.currentRow()
+        if data is None or row < 0:
+            return
+        flow_count = len(self._mapping_values(data, "StartFlow"))
+        self._set_sequence_item(
+            data,
+            "StartFlow",
+            row,
+            self.stage_start_flow.value(),
+            default=0.0,
+            minimum_length=flow_count,
+        )
+        self._set_sequence_item(
+            data,
+            "EndFlow",
+            row,
+            self.stage_end_flow.value(),
+            default=0.0,
+            minimum_length=flow_count,
+        )
+        self._set_sequence_item(
+            data,
+            "FlowA",
+            row,
+            self.stage_flow_rate.value(),
+            default=0.0,
+            minimum_length=flow_count,
+        )
+        self._set_stage_dirty()
+
+    def _set_stage_dirty(self) -> None:
+        self._stage_settings_dirty = True
+        self._update_stage_editor_controls()
+
+    def _next_stage_path(self) -> Path:
+        assert self.program_path is not None
+        numbers = []
+        for path in (*self._stage_paths, *self._removed_stage_paths):
+            stem = path.stem
+            suffix = stem[5:] if stem.lower().startswith("stage") else ""
+            if suffix.isdigit():
+                numbers.append(int(suffix))
+        return self.program_path / f"Stage{max(numbers, default=0) + 1}.msdef"
+
+    def _add_stage(self) -> None:
+        if self.program_path is None:
+            return
+        selected = self._selected_stage_data()
+        temperature = float(selected.get("EndTemp", 20.0)) if selected else 20.0
+        flow_count = len(self._mapping_values(selected or {}, "StartFlow")) or 4
+        valve_count = len(self._mapping_values(selected or {}, "ValveStates")) or 2
+        path = self._next_stage_path()
+        data = default_stage_mapping(
+            path.stem,
+            temperature=temperature,
+            flow_channels=flow_count,
+            valve_channels=valve_count,
+        )
+        self._stage_paths.append(path)
+        self._stage_working.append(data)
+        self._set_stage_dirty()
+        self._refresh_program_config()
+        self.stage_list.setCurrentRow(len(self._stage_working) - 1)
+
+    def _copy_stage(self) -> None:
+        selected = self._selected_stage_data()
+        if selected is None or self.program_path is None:
+            return
+        path = self._next_stage_path()
+        copied = copy.deepcopy(selected)
+        copied["Name"] = path.stem
+        self._stage_paths.append(path)
+        self._stage_working.append(copied)
+        self._set_stage_dirty()
+        self._refresh_program_config()
+        self.stage_list.setCurrentRow(len(self._stage_working) - 1)
+
+    def _remove_stage(self) -> None:
+        row = self.stage_list.currentRow()
+        if not 0 <= row < len(self._stage_working):
+            return
+        if len(self._stage_working) == 1:
+            QtWidgets.QMessageBox.warning(
+                self, "Cannot remove stage", "A program must contain at least one stage."
+            )
+            return
+        name = str(self._stage_working[row].get("Name", self._stage_paths[row].stem))
+        answer = QtWidgets.QMessageBox.question(
+            self,
+            "Remove stage",
+            f"Remove {name} from this program?\n\nThe file is retained in a recovery "
+            "backup after Save program.",
+            QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+            QtWidgets.QMessageBox.No,
+        )
+        if answer != QtWidgets.QMessageBox.Yes:
+            return
+        path = self._stage_paths.pop(row)
+        self._stage_working.pop(row)
+        if path.exists():
+            self._removed_stage_paths.add(path)
+        self._set_stage_dirty()
+        self._refresh_program_config()
+        self.stage_list.setCurrentRow(min(row, len(self._stage_working) - 1))
+
+    def _update_stage_editor_controls(self) -> None:
+        has_program = self.program_path is not None and bool(self._stage_working)
+        selected = self.stage_list.currentRow() >= 0
+        self.save_program_button.setEnabled(has_program and self._stage_settings_dirty)
+        self.add_stage_button.setEnabled(has_program and not self._running)
+        self.copy_stage_button.setEnabled(has_program and selected and not self._running)
+        self.remove_stage_button.setEnabled(
+            has_program and selected and len(self._stage_working) > 1 and not self._running
+        )
+        if self._stage_settings_dirty:
+            self.stage_editor_status.setText(
+                "Unsaved program changes — Save program writes stage files atomically."
+            )
+        elif has_program:
+            self.stage_editor_status.setText(
+                "Stage files saved. Add, copy, remove, or edit values to make changes."
+            )
+        else:
+            self.stage_editor_status.setText("Create or open a program folder to begin.")
+
+        editor_enabled = has_program and selected and not self._running
+        for widget in (
+            self.stage_temperature_mode,
+            self.stage_duration,
+            self.stage_start_temperature,
+            self.stage_end_temperature,
+            self.stage_temperature_rate,
+            self.stage_auto_start,
+            self.stage_stabilize,
+            self.stage_valve_list,
+            self.stage_valve_state,
+            self.stage_valve_mode,
+            self.stage_pulse_length,
+            self.stage_pulse_gap,
+            self.stage_flow_list,
+            self.stage_start_flow,
+            self.stage_end_flow,
+            self.stage_flow_rate,
+        ):
+            widget.setEnabled(editor_enabled)
+
+    def _save_stage_settings(
+        self,
+        checked: bool = False,
+        *,
+        announce: bool = True,
+    ) -> bool:
+        del checked
+        if self.program_path is None or not self._stage_working:
+            return False
+        try:
+            for path, data in self._stage_documents():
+                ProcessStage.from_mapping(data, default_name=path.stem)
+        except (KeyError, TypeError, ValueError) as exc:
+            QtWidgets.QMessageBox.critical(self, "Cannot save program", str(exc))
+            return False
+
+        backup_root: Path | None = None
+        existing_paths = [path for path in self._stage_paths if path.exists()]
+        removed_paths = sorted(
+            (path for path in self._removed_stage_paths if path.exists()),
+            key=lambda path: path.name.lower(),
+        )
+        try:
+            if existing_paths or removed_paths:
+                stamp = time.strftime("%Y%m%d_%H%M%S")
+                backup_root = (
+                    self.program_path
+                    / ".specmass-backup"
+                    / f"{stamp}_{time.time_ns() % 1_000_000_000:09d}"
+                )
+                before_directory = backup_root / "before-save"
+                removed_directory = backup_root / "removed"
+                before_directory.mkdir(parents=True)
+                for path in existing_paths:
+                    shutil.copy2(path, before_directory / path.name)
+                if removed_paths:
+                    removed_directory.mkdir(parents=True)
+                    for path in removed_paths:
+                        shutil.move(str(path), str(removed_directory / path.name))
+
+            for path, data in self._stage_documents():
+                save_legacy_json(path, data)
+            updated_program = load_program(self.program_path)
+            updated_documents = load_stage_documents(self.program_path)
+        except (OSError, TypeError, ValueError) as exc:
+            recovery = f"\nRecovery copy: {backup_root}" if backup_root else ""
+            QtWidgets.QMessageBox.critical(
+                self,
+                "Cannot save program",
+                f"{exc}{recovery}",
+            )
+            return False
+
+        self.program = updated_program
+        self._stage_paths = [path for path, _ in updated_documents]
+        self._stage_working = [copy.deepcopy(data) for _, data in updated_documents]
+        self._removed_stage_paths.clear()
+        self._stage_settings_dirty = False
+        self.controller = ProcessController()
+        self.controller.load(updated_program)
+        flow_count = max(
+            (len(stage.start_flows) for stage in updated_program.stages), default=0
+        )
+        self.backend = SimulatedBackend(flow_channels=flow_count)
+        self.runtime = None
+        self._program_duration = sum(
+            stage.effective_duration_seconds() for stage in updated_program.stages
+        )
+        self._mass_names = tuple(
+            mass_stimuli_from_scan_settings(updated_program.scan_settings)
+        )
+        self.flow_plot.configure_series(
+            tuple(f"Ch{index}" for index in range(flow_count)), FLOW_COLORS
+        )
+        self.mass_plot.configure_series(self._mass_names, MASS_COLORS)
+        self._build_flow_channels(flow_count)
+        self._update_filament(updated_program)
+        self.status_label.setText("Ready For Start")
+        self.setpoint_label.setText(
+            f"{updated_program.stages[0].start_temperature:.2f}"
+        )
+        self.remaining_label.setText(_format_elapsed(self._program_duration))
+        self._refresh_program_config()
+        self._update_device_states()
+        self._update_controls()
+        if announce:
+            message = "Stage files saved using atomic replacement."
+            if backup_root is not None:
+                message += f" Recovery copy: {backup_root}"
+            self.stage_editor_status.setText(message)
+        return True
+
+    def _confirm_stage_changes(self) -> bool:
+        if not self._stage_settings_dirty:
+            return True
+        answer = QtWidgets.QMessageBox.warning(
+            self,
+            "Unsaved stage settings",
+            "Save the program stage changes before leaving this screen?",
+            QtWidgets.QMessageBox.Save
+            | QtWidgets.QMessageBox.Discard
+            | QtWidgets.QMessageBox.Cancel,
+            QtWidgets.QMessageBox.Save,
+        )
+        if answer == QtWidgets.QMessageBox.Save:
+            return self._save_stage_settings(announce=False)
+        if answer == QtWidgets.QMessageBox.Discard:
+            try:
+                self._load_stage_editor_documents()
+            except (OSError, TypeError, ValueError) as exc:
+                QtWidgets.QMessageBox.critical(
+                    self, "Cannot discard program changes", str(exc)
+                )
+                return False
+            self._refresh_program_config()
+            return True
+        return False
 
     def _show_hiden_config(self) -> None:
         if self.program is None or self.program_path is None or self._running:
+            return
+        if not self._confirm_stage_changes():
             return
         self._load_hiden_editor()
         self.page_stack.setCurrentWidget(self.hiden_config_page)
@@ -1475,16 +2051,37 @@ class SpecMassWindow(QtWidgets.QMainWindow):
         self._set_hiden_dirty()
 
     def _hiden_scan_selected(self, row: int) -> None:
-        self.remove_mass_button.setEnabled(row >= 0 and bool(self._working_scans()))
+        selected = row >= 0 and bool(self._working_scans())
+        self.edit_mass_button.setEnabled(selected)
+        self.remove_mass_button.setEnabled(selected)
 
     def _add_hiden_mass(self) -> None:
-        dialog = MassScanDialog(self)
+        scans = self._working_scans()
+        dialog = MassScanDialog(self, scan_number=len(scans) + 1)
         if dialog.exec_() != QtWidgets.QDialog.Accepted:
             return
-        scans = self._working_scans()
         scans.append(dialog.scan_definition())
         self._set_hiden_dirty()
         self._refresh_hiden_scan_list(select_row=len(scans) - 1)
+
+    def _edit_hiden_scan(self) -> None:
+        row = self.hiden_scan_list.currentRow()
+        scans = self._working_scans()
+        if not 0 <= row < len(scans):
+            return
+        original = scans[row]
+        dialog = MassScanDialog(
+            self,
+            initial_scan=original,
+            scan_number=row + 1,
+        )
+        if dialog.exec_() != QtWidgets.QDialog.Accepted:
+            return
+        updated = copy.deepcopy(dict(original))
+        updated.update(dialog.scan_definition())
+        scans[row] = updated
+        self._set_hiden_dirty()
+        self._refresh_hiden_scan_list(select_row=row)
 
     def _remove_hiden_scan(self) -> None:
         row = self.hiden_scan_list.currentRow()
@@ -1512,9 +2109,11 @@ class SpecMassWindow(QtWidgets.QMainWindow):
     def _update_hiden_editor_controls(self) -> None:
         has_editor = self._scan_settings_working is not None
         scans = self._working_scans() if has_editor else []
+        selected = self.hiden_scan_list.currentRow() >= 0
         self.add_mass_button.setEnabled(has_editor)
+        self.edit_mass_button.setEnabled(has_editor and bool(scans) and selected)
         self.remove_mass_button.setEnabled(
-            has_editor and bool(scans) and self.hiden_scan_list.currentRow() >= 0
+            has_editor and bool(scans) and selected
         )
         self.save_scan_settings_button.setEnabled(
             has_editor and bool(scans) and self._scan_settings_dirty
@@ -1581,6 +2180,8 @@ class SpecMassWindow(QtWidgets.QMainWindow):
         return False
 
     def _choose_program(self) -> None:
+        if not self._confirm_stage_changes():
+            return
         chosen = QtWidgets.QFileDialog.getExistingDirectory(
             self,
             "Select folder containing Stage*.msdef",
@@ -1588,6 +2189,25 @@ class SpecMassWindow(QtWidgets.QMainWindow):
         )
         if chosen:
             self.load_program(Path(chosen))
+
+    def _create_new_program(self) -> None:
+        if self._running or not self._confirm_stage_changes():
+            return
+        parent = self.program_path.parent if self.program_path is not None else Path.cwd()
+        dialog = NewProgramDialog(
+            self,
+            initial_directory=parent / "New SpecMass Program",
+        )
+        if dialog.exec_() != QtWidgets.QDialog.Accepted:
+            return
+        try:
+            root = create_program_directory(dialog.program_path())
+        except (OSError, TypeError, ValueError) as exc:
+            QtWidgets.QMessageBox.critical(self, "Cannot create program", str(exc))
+            return
+        self.load_program(root)
+        if self.program_path == root:
+            self._show_program_config()
 
     def _start_hardware_monitor(self) -> None:
         assert self.monitor_backend is not None
@@ -1703,6 +2323,17 @@ class SpecMassWindow(QtWidgets.QMainWindow):
         self._mass_names = tuple(mass_stimuli_from_scan_settings(program.scan_settings))
         self._scan_settings_working = None
         self._scan_settings_dirty = False
+        try:
+            self._load_stage_editor_documents()
+        except (OSError, TypeError, ValueError) as exc:
+            QtWidgets.QMessageBox.critical(
+                self, "Cannot load editable stage files", str(exc)
+            )
+            self.program = None
+            self.program_path = None
+            self.backend = None
+            self.controller = None
+            return
 
         resolved = str(path.resolve())
         self.program_label.setText(path.name)
@@ -1726,8 +2357,28 @@ class SpecMassWindow(QtWidgets.QMainWindow):
         self._refresh_program_config()
         self._update_controls()
 
+    def _simulation_output_path(self, suffix: str) -> Path:
+        if self.program_path is None:
+            raise RuntimeError("No program folder is loaded")
+        normalized_suffix = suffix if suffix.startswith(".") else f".{suffix}"
+        stamp = time.strftime("%Y%m%d_%H%M%S")
+        candidate = self.program_path / f"specmass_sim_{stamp}{normalized_suffix}"
+        counter = 2
+        while candidate.exists():
+            candidate = (
+                self.program_path
+                / f"specmass_sim_{stamp}_{counter}{normalized_suffix}"
+            )
+            counter += 1
+        return candidate
+
     def _start(self) -> None:
-        if not self.program or not self.controller or not self.backend:
+        if (
+            not self.program
+            or self.program_path is None
+            or not self.controller
+            or not self.backend
+        ):
             return
         try:
             self.controller.cooling_temperature = self.cooling_spin.value()
@@ -1736,11 +2387,9 @@ class SpecMassWindow(QtWidgets.QMainWindow):
             QtWidgets.QMessageBox.critical(self, "Cannot start", str(exc))
             return
 
-        output_dir = Path.cwd() / ".run-output"
-        stamp = time.strftime("%Y%m%d_%H%M%S")
         flow_count = max((len(stage.start_flows) for stage in self.program.stages), default=0)
         if importlib.util.find_spec("nptdms") is not None:
-            output_path = output_dir / f"specmass_sim_{stamp}.tdms"
+            output_path = self._simulation_output_path(".tdms")
             self.telemetry = TdmsTelemetryWriter(
                 output_path,
                 flow_channels=flow_count,
@@ -1748,7 +2397,7 @@ class SpecMassWindow(QtWidgets.QMainWindow):
                 nominal_increment_seconds=self.TICK_MS / 1000.0,
             )
         else:
-            output_path = output_dir / f"specmass_sim_{stamp}.csv"
+            output_path = self._simulation_output_path(".csv")
             self.telemetry = CsvTelemetryWriter(output_path, flow_channels=flow_count)
         self.runtime = SpecMassRuntime(
             backend=self.backend,
@@ -1946,7 +2595,13 @@ class SpecMassWindow(QtWidgets.QMainWindow):
         if self.monitor_backend is not None:
             self.load_button.setEnabled(True)
             self.details_button.setEnabled(False)
+            self.new_program_button.setEnabled(False)
             self.open_program_button.setEnabled(False)
+            self.save_program_button.setEnabled(False)
+            self.stage_table_button.setEnabled(False)
+            self.add_stage_button.setEnabled(False)
+            self.copy_stage_button.setEnabled(False)
+            self.remove_stage_button.setEnabled(False)
             self.environment_scan_button.setEnabled(False)
             self.start_button.setEnabled(False)
             self.stop_button.setEnabled(False)
@@ -1968,7 +2623,9 @@ class SpecMassWindow(QtWidgets.QMainWindow):
         on_dashboard = self.page_stack.currentWidget() is self.dashboard_page
         self.load_button.setEnabled(True)
         self.details_button.setEnabled(not self._running)
+        self.new_program_button.setEnabled(not self._running)
         self.open_program_button.setEnabled(not self._running)
+        self.stage_table_button.setEnabled(self.program is not None and not self._running)
         self.environment_scan_button.setEnabled(
             bool(self.program and not self._running)
         )
@@ -1983,6 +2640,8 @@ class SpecMassWindow(QtWidgets.QMainWindow):
         self.stop_button.setEnabled(self._running)
         self.continue_button.setEnabled(can_continue)
         self.apply_flows_button.setEnabled(self.program is not None)
+        self._update_stage_editor_controls()
+        self._update_hiden_editor_controls()
 
     def _set_follow_live(self, enabled: bool) -> None:
         self.temperature_plot.set_follow_live(enabled)
@@ -1990,19 +2649,29 @@ class SpecMassWindow(QtWidgets.QMainWindow):
         self.mass_plot.set_follow_live(enabled)
 
     def _show_stages(self) -> None:
-        if self.program is None:
+        if self.program is None or not self._stage_working:
+            return
+        try:
+            stages = tuple(
+                ProcessStage.from_mapping(data, default_name=path.stem)
+                for path, data in self._stage_documents()
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            QtWidgets.QMessageBox.warning(
+                self, "Invalid pending stage settings", str(exc)
+            )
             return
         dialog = QtWidgets.QDialog(self)
         dialog.setWindowTitle("Program details")
         dialog.resize(820, 380)
         layout = QtWidgets.QVBoxLayout(dialog)
-        table = QtWidgets.QTableWidget(len(self.program.stages), 7)
+        table = QtWidgets.QTableWidget(len(stages), 7)
         table.setHorizontalHeaderLabels(
             ("Stage", "Mode", "Start °C", "End °C", "Rate °C/min", "Duration s", "Auto")
         )
         table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
         table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
-        for row, stage in enumerate(self.program.stages):
+        for row, stage in enumerate(stages):
             values = (
                 stage.name,
                 "Isothermal" if stage.temperature_mode is TemperatureMode.ISOTHERMAL else "Ramp",
@@ -2032,6 +2701,9 @@ class SpecMassWindow(QtWidgets.QMainWindow):
 
     def closeEvent(self, event: QtGui.QCloseEvent) -> None:
         if not self._confirm_leave_hiden_editor():
+            event.ignore()
+            return
+        if not self._confirm_stage_changes():
             event.ignore()
             return
         self.tick_timer.stop()
