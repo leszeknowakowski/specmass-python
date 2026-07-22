@@ -137,3 +137,9 @@ The monitor accepts an optional `--monitor-output` path ending in `.csv` or
 TDMS retains the legacy temperature and flow group/channel paths and adds exact
 `Time/ElapsedSeconds` and `Time/UtcSeconds` channels. TDMS root properties mark
 the session as `ReadOnlyHardwareMonitor` and output commands as disabled.
+
+An offscreen smoke run on the instrument PC produced a finalized 6.3 kB TDMS
+file with 11 complete samples. Consecutive sample intervals were 0.990-1.042 s;
+both temperature channels and all four flow channels contained live values.
+Every `WriteEnabled` and `WritePerformed` sample was zero, and the root metadata
+reported `SpecMass_OutputCommandsEnabled=0`.

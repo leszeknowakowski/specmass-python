@@ -122,6 +122,11 @@ four real Brooks inputs to CSV or TDMS. The TDMS hierarchy preserves the legacy
 temperature/flow paths but uses explicit elapsed and UTC time channels, avoiding
 the invalid mass-waveform timebase found in the supplied LabVIEW run.
 
+The logging path was exercised against the deployed COM13/COM14 hardware with
+a bounded offscreen GUI run. The resulting TDMS file round-tripped through
+npTDMS with complete temperature and flow series, approximately one-second
+sample spacing, and zero values in every write-enabled/write-performed channel.
+
 ## Instrument inventory correction
 
 The zero-I/O report made on the instrument computer shows that its active Hiden
