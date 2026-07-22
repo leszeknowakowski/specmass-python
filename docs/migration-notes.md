@@ -132,6 +132,14 @@ no missing/non-finite readings, no acquisition gap above 1.11 seconds, and a
 clearly isolated thermocouple-touch excursion. All actuator fields remained
 disabled/zero throughout the recording.
 
+The program state machine can now be layered over those readers with
+`--shadow-run`. This mode calculates PID heater percentage, valve states, and
+Brooks program setpoints while a dedicated wrapper masks every write and only
+retains the calculation for the GUI and telemetry. Automated tests assert that
+the wrapped read-only backend's `apply` method is never called and that the
+physical output-command counter remains zero. A physical shadow run is the next
+operator validation; it is not evidence that any actuator path is ready.
+
 ## Instrument inventory correction
 
 The zero-I/O report made on the instrument computer shows that its active Hiden

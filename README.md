@@ -213,6 +213,36 @@ The combined monitor reads COM14 and COM13 approximately once per second. Its
 Brooks client has no setpoint method, and the shared backend rejects all heater,
 valve, and flow commands. Do not run it concurrently with LabVIEW.
 
+### Hardware shadow run
+
+Shadow mode executes a selected program against the same live ADAM4118 and
+Brooks inputs while calculating the heater percentage, valve states, and flow
+setpoints that a future hardware backend would request. It does not send those
+values to any device:
+
+```bat
+python -m specmass.ui --shadow-run --program "D:\path\to\program" --builds "D:\_SpecMass\Builds" --allow-read-hardware
+```
+
+Close LabVIEW first because shadow mode repeatedly sends the validated read
+queries on COM14 and COM13. It does not open COM3, COM12, or COM23. The yellow
+banner and device table identify the mode; Brooks manual controls are disabled.
+The shadow wrapper contains only the existing read-only clients, never calls
+their rejecting `apply` path, forces every flow write-enabled/performed value
+to zero, and records an internal output-command count of zero.
+
+Select **START** to begin the program. Live measurements and calculated
+requests are written to a non-overwriting `specmass_shadow_*.tdms` (or `.csv`)
+file in the program folder. TDMS root metadata records
+`SpecMass_Mode=HardwareShadowRun` and `SpecMass_OutputCommandsEnabled=0`.
+Ports are closed on completion, error, or normal window close.
+
+Because shadow mode cannot heat the real furnace, start-temperature
+stabilization advances only if the live furnace is already within the program's
+tolerance. Use a disposable program whose first stage starts near the current
+temperature for the initial validation. **Wait for cooling** remains optional
+and uses the live primary thermocouple when enabled.
+
 Add a new output filename to record the same live samples. Existing files are
 never overwritten:
 

@@ -144,6 +144,29 @@ both temperature channels and all four flow channels contained live values.
 Every `WriteEnabled` and `WritePerformed` sample was zero, and the root metadata
 reported `SpecMass_OutputCommandsEnabled=0`.
 
+## Hardware shadow runner
+
+The next layer reuses that exact combined read-only monitor inside
+`HardwareShadowBackend`. The normal process controller and PID calculate stage
+temperature, heater, valve, and Brooks requests, but the wrapper has no
+actuator client and never calls the monitor backend's rejecting `apply` method.
+The runtime additionally forces all Brooks write-enabled and write-performed
+masks false before logging.
+
+Shadow mode is selected only with the explicit combination `--shadow-run`,
+`--program`, `--builds`, and `--allow-read-hardware`. It polls COM14 and COM13
+approximately once per second and does not open the Hiden, heater, or valve
+ports. The GUI uses a persistent yellow safety banner, disables manual flow
+controls, labels ADAM4118 and Brooks1 as read-only, and labels all output devices
+as disabled. Shadow TDMS logs carry `HardwareShadowRun` mode metadata and a
+zero output-command flag.
+
+This implementation has automated zero-dispatch coverage but has not yet been
+run against the physical installation. The first live validation must use a
+disposable program starting near the measured furnace temperature, with
+LabVIEW closed, and must inspect the resulting TDMS write masks and root
+metadata before any later migration milestone.
+
 A subsequent operator-observed stability run produced 1,503 complete CSV rows
 over 1,501.93 s (25.03 min). Timestamps were strictly increasing with a median
 1.0000 s interval, maximum 1.1013 s interval, and no gap over 1.5 s. There were

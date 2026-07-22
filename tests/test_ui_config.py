@@ -10,6 +10,8 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 try:
     from PyQt5 import QtWidgets
 
+    from specmass.devices.base import SensorSnapshot
+    from specmass.devices.hardware_shadow import HardwareShadowBackend
     from specmass.hiden import new_hiden_mass_scan
     from specmass.legacy import load_legacy_json
     from specmass.ui import MassScanDialog, SpecMassWindow
@@ -234,6 +236,75 @@ class ConfigurationGuiTests(unittest.TestCase):
         self.window.cooling_spin.setValue(75.0)
         self.assertTrue(self.window.cooling_spin.isEnabled())
         self.assertEqual(self.window._configured_cooling_temperature(), 75.0)
+
+    def test_shadow_window_is_visibly_read_only_and_uses_shadow_output_name(self):
+        reader = Mock()
+        reader.channel_names = ("Temperature", "Temperature2")
+        reader.flow_channel_names = ("Ch0", "Ch1", "Ch2", "Ch3")
+        reader.monitored_devices = ("ADAM4118", "Brooks1")
+        reader.poll_interval_ms = 1000
+        shadow = HardwareShadowBackend(reader)
+        window = SpecMassWindow(
+            initial_program=self.program_path,
+            shadow_backend=shadow,
+        )
+        try:
+            self.assertIs(window.backend, shadow)
+            self.assertIn("HARDWARE SHADOW RUN", window.mode_banner.text())
+            self.assertEqual(window.tick_timer.interval(), 1000)
+            self.assertFalse(window.apply_flows_button.isEnabled())
+            self.assertEqual(
+                window._device_state_labels["ADAM4118"].text(), "Read Only"
+            )
+            self.assertEqual(
+                window._device_state_labels["ADAM4050"].text(), "Disabled"
+            )
+            with self.assertRaises(ValueError):
+                window._backend_for_program((4, 3))
+            with patch("specmass.ui.time.strftime", return_value="20260722_190000"):
+                output = window._simulation_output_path("tdms")
+            self.assertEqual(
+                output,
+                self.program_path / "specmass_shadow_20260722_190000.tdms",
+            )
+        finally:
+            window._stage_settings_dirty = False
+            window.close()
+        reader.safe_shutdown.assert_called()
+
+    def test_shadow_start_reads_live_inputs_but_never_calls_reader_apply(self):
+        reader = Mock()
+        reader.channel_names = ("Temperature", "Temperature2")
+        reader.flow_channel_names = ("Ch0", "Ch1", "Ch2", "Ch3")
+        reader.monitored_devices = ("ADAM4118", "Brooks1")
+        reader.poll_interval_ms = 1000
+        reader.read.side_effect = lambda timestamp: SensorSnapshot(
+            timestamp=timestamp,
+            temperature=24.0,
+            temperatures=(24.0, 25.0),
+            flows=(0.0, 0.0, 0.0, 0.0),
+            masses={},
+        )
+        shadow = HardwareShadowBackend(reader)
+        window = SpecMassWindow(
+            initial_program=self.program_path,
+            shadow_backend=shadow,
+        )
+        try:
+            window._start()
+            window._tick()
+            window._tick()
+            self.assertEqual(reader.read.call_count, 2)
+            reader.apply.assert_not_called()
+            self.assertEqual(shadow.output_commands_sent, 0)
+            self.assertTrue(window.output_label.text().startswith("specmass_shadow_"))
+            self.assertEqual(
+                shadow.last_calculated_command.flow_write_enabled,
+                (False,) * 4,
+            )
+        finally:
+            window._stage_settings_dirty = False
+            window.close()
 
 
 if __name__ == "__main__":

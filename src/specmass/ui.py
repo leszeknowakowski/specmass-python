@@ -17,6 +17,7 @@ from PyQt5 import QtCore, QtGui, QtWidgets
 from .devices.adam4118 import Adam4118Client, Adam4118MonitorBackend
 from .devices.base import ControlCommand
 from .devices.brooks0254 import Brooks0254ReadOnlyClient
+from .devices.hardware_shadow import HardwareShadowBackend
 from .devices.read_only_monitor import ReadOnlyHardwareMonitorBackend
 from .devices.serial_transport import PySerialTransaction, SerialSettings
 from .devices.simulated import SimulatedBackend
@@ -790,6 +791,7 @@ class SpecMassWindow(QtWidgets.QMainWindow):
         *,
         initial_program: Path | None = None,
         monitor_backend: Adam4118MonitorBackend | ReadOnlyHardwareMonitorBackend | None = None,
+        shadow_backend: HardwareShadowBackend | None = None,
         monitor_telemetry: TelemetryWriter | None = None,
         monitor_output: Path | None = None,
         builds_directory: Path | None = None,
@@ -801,11 +803,14 @@ class SpecMassWindow(QtWidgets.QMainWindow):
 
         self.program: ProcessProgram | None = None
         self.program_path: Path | None = None
-        self.backend: SimulatedBackend | None = None
+        self.backend: SimulatedBackend | HardwareShadowBackend | None = None
         self.controller: ProcessController | None = None
         self.runtime: SpecMassRuntime | None = None
         self.telemetry: TelemetryWriter | None = monitor_telemetry
         self.monitor_backend = monitor_backend
+        self.shadow_backend = shadow_backend
+        if self.monitor_backend is not None and self.shadow_backend is not None:
+            raise ValueError("Monitor and shadow backends cannot be active together")
         self.monitor_output = monitor_output
         self.builds_directory = builds_directory
         self._monitor_error = False
@@ -839,6 +844,8 @@ class SpecMassWindow(QtWidgets.QMainWindow):
 
         self._build_layout()
         self._apply_styles()
+        if self.shadow_backend is not None:
+            self._configure_shadow_mode()
 
         self.clock_timer = QtCore.QTimer(self)
         self.clock_timer.setInterval(1000)
@@ -847,7 +854,9 @@ class SpecMassWindow(QtWidgets.QMainWindow):
         self._update_clock()
 
         self.tick_timer = QtCore.QTimer(self)
-        self.tick_timer.setInterval(self.TICK_MS)
+        self.tick_timer.setInterval(
+            int(getattr(self.shadow_backend, "poll_interval_ms", self.TICK_MS))
+        )
         self.tick_timer.setTimerType(QtCore.Qt.PreciseTimer)
         self.tick_timer.timeout.connect(self._tick)
         self.monitor_timer = QtCore.QTimer(self)
@@ -1888,8 +1897,15 @@ class SpecMassWindow(QtWidgets.QMainWindow):
         if self.program_path is None or not self._stage_working:
             return False
         try:
-            for path, data in self._stage_documents():
+            validated_stages = tuple(
                 ProcessStage.from_mapping(data, default_name=path.stem)
+                for path, data in self._stage_documents()
+            )
+            flow_counts = tuple(
+                len(stage.start_flows) for stage in validated_stages
+            )
+            flow_count = max(flow_counts, default=0)
+            backend = self._backend_for_program(flow_counts)
         except (KeyError, TypeError, ValueError) as exc:
             QtWidgets.QMessageBox.critical(self, "Cannot save program", str(exc))
             return False
@@ -1938,10 +1954,7 @@ class SpecMassWindow(QtWidgets.QMainWindow):
         self._stage_settings_dirty = False
         self.controller = ProcessController()
         self.controller.load(updated_program)
-        flow_count = max(
-            (len(stage.start_flows) for stage in updated_program.stages), default=0
-        )
-        self.backend = SimulatedBackend(flow_channels=flow_count)
+        self.backend = backend
         self.runtime = None
         self._program_duration = sum(
             stage.effective_duration_seconds() for stage in updated_program.stages
@@ -2217,6 +2230,36 @@ class SpecMassWindow(QtWidgets.QMainWindow):
         if self.program_path == root:
             self._show_program_config()
 
+    def _configure_shadow_mode(self) -> None:
+        self.setWindowTitle("Mass Spectrometer Station — SpecMass hardware shadow run")
+        self.mode_banner.setText(
+            "HARDWARE SHADOW RUN — LIVE ADAM4118/BROOKS READS; "
+            "HEATER, VALVE, FLOW, AND HIDEN WRITES DISABLED"
+        )
+        self.mode_banner.setStyleSheet(
+            "background:#fff4cc; color:#714b00; font-weight:700; padding:4px;"
+        )
+        self.wait_for_cooling_check.setToolTip(
+            "Continue live read-only monitoring and shadow logging until the measured "
+            "furnace temperature reaches this threshold. No output is sent."
+        )
+
+    def _backend_for_program(
+        self, flow_counts: tuple[int, ...]
+    ) -> SimulatedBackend | HardwareShadowBackend:
+        flow_count = max(flow_counts, default=0)
+        if self.shadow_backend is None:
+            return SimulatedBackend(flow_channels=flow_count)
+        observed_flow_count = len(self.shadow_backend.flow_channel_names)
+        if not flow_counts or any(
+            count != observed_flow_count for count in flow_counts
+        ):
+            raise ValueError(
+                f"Every shadow stage must define exactly {observed_flow_count} "
+                f"Brooks channels; stage channel counts are {flow_counts}."
+            )
+        return self.shadow_backend
+
     def _start_hardware_monitor(self) -> None:
         assert self.monitor_backend is not None
         flow_names = tuple(getattr(self.monitor_backend, "flow_channel_names", ()))
@@ -2315,15 +2358,17 @@ class SpecMassWindow(QtWidgets.QMainWindow):
             return
         try:
             program = load_program(path)
+            flow_counts = tuple(len(stage.start_flows) for stage in program.stages)
+            flow_count = max(flow_counts, default=0)
+            backend = self._backend_for_program(flow_counts)
         except Exception as exc:
             QtWidgets.QMessageBox.critical(self, "Cannot load program", str(exc))
             return
 
         self._close_telemetry()
-        flow_count = max((len(stage.start_flows) for stage in program.stages), default=0)
         self.program = program
         self.program_path = path
-        self.backend = SimulatedBackend(flow_channels=flow_count)
+        self.backend = backend
         self.controller = ProcessController()
         self.controller.load(program)
         self.runtime = None
@@ -2348,7 +2393,11 @@ class SpecMassWindow(QtWidgets.QMainWindow):
         self.program_label.setToolTip(resolved)
         self.status_label.setText("Ready For Start")
         self.stage_label.setText("—")
-        self.temperature_label.setText(f"{self.backend.temperature:.2f} °C")
+        self.temperature_label.setText(
+            "Waiting for live read"
+            if self.shadow_backend is not None
+            else f"{self.backend.temperature:.2f} °C"
+        )
         self.setpoint_label.setText(f"{program.stages[0].start_temperature:.2f}")
         self.heater_label.setText("0.0 %")
         self.remaining_label.setText(_format_elapsed(self._program_duration))
@@ -2356,7 +2405,15 @@ class SpecMassWindow(QtWidgets.QMainWindow):
         self.output_label.setText("No run log")
         self.output_label.setToolTip("")
 
-        self.temperature_plot.clear_data()
+        temperature_series = (
+            (*self.shadow_backend.channel_names, "Setpoint")
+            if self.shadow_backend is not None
+            else ("Temperature", "Setpoint")
+        )
+        self.temperature_plot.configure_series(
+            tuple(temperature_series),
+            ("#111111", "#df3e3e", "#26b83f"),
+        )
         self.flow_plot.configure_series(tuple(f"Ch{index}" for index in range(flow_count)), FLOW_COLORS)
         self.mass_plot.configure_series(self._mass_names, MASS_COLORS)
         self._build_flow_channels(flow_count)
@@ -2370,12 +2427,15 @@ class SpecMassWindow(QtWidgets.QMainWindow):
             raise RuntimeError("No program folder is loaded")
         normalized_suffix = suffix if suffix.startswith(".") else f".{suffix}"
         stamp = time.strftime("%Y%m%d_%H%M%S")
-        candidate = self.program_path / f"specmass_sim_{stamp}{normalized_suffix}"
+        prefix = (
+            "specmass_shadow" if self.shadow_backend is not None else "specmass_sim"
+        )
+        candidate = self.program_path / f"{prefix}_{stamp}{normalized_suffix}"
         counter = 2
         while candidate.exists():
             candidate = (
                 self.program_path
-                / f"specmass_sim_{stamp}_{counter}{normalized_suffix}"
+                / f"{prefix}_{stamp}_{counter}{normalized_suffix}"
             )
             counter += 1
         return candidate
@@ -2396,17 +2456,37 @@ class SpecMassWindow(QtWidgets.QMainWindow):
             return
 
         flow_count = max((len(stage.start_flows) for stage in self.program.stages), default=0)
+        temperature_names = (
+            tuple(self.shadow_backend.channel_names)
+            if self.shadow_backend is not None
+            else ("Temperature",)
+        )
         if importlib.util.find_spec("nptdms") is not None:
             output_path = self._simulation_output_path(".tdms")
+            root_properties = (
+                {
+                    "SpecMass_Mode": "HardwareShadowRun",
+                    "SpecMass_OutputCommandsEnabled": 0,
+                    "SpecMass_ReadDevices": "ADAM4118,Brooks1",
+                }
+                if self.shadow_backend is not None
+                else None
+            )
             self.telemetry = TdmsTelemetryWriter(
                 output_path,
                 flow_channels=flow_count,
                 mass_stimuli=mass_stimuli_from_scan_settings(self.program.scan_settings),
-                nominal_increment_seconds=self.TICK_MS / 1000.0,
+                nominal_increment_seconds=self.tick_timer.interval() / 1000.0,
+                temperature_names=temperature_names,
+                root_properties=root_properties,
             )
         else:
             output_path = self._simulation_output_path(".csv")
-            self.telemetry = CsvTelemetryWriter(output_path, flow_channels=flow_count)
+            self.telemetry = CsvTelemetryWriter(
+                output_path,
+                flow_channels=flow_count,
+                temperature_names=tuple(name.lower() for name in temperature_names),
+            )
         self.runtime = SpecMassRuntime(
             backend=self.backend,
             controller=self.controller,
@@ -2468,7 +2548,11 @@ class SpecMassWindow(QtWidgets.QMainWindow):
             "—" if command.temperature_setpoint is None else f"{command.temperature_setpoint:.2f}"
         )
         self.heater_label.setText(f"{command.heater_percent:.1f} %")
-        self.temperature_plot.append(timestamp, (frame.snapshot.temperature, command.temperature_setpoint))
+        temperatures = frame.snapshot.temperatures or (frame.snapshot.temperature,)
+        self.temperature_plot.append(
+            timestamp,
+            (*temperatures, command.temperature_setpoint),
+        )
         self.flow_plot.append(timestamp, tuple(frame.snapshot.flows))
         masses = frame.snapshot.masses or {}
         self.mass_plot.append(timestamp, tuple(masses.get(name) for name in self._mass_names))
@@ -2477,7 +2561,11 @@ class SpecMassWindow(QtWidgets.QMainWindow):
         if status.completed:
             self._running = False
             self.tick_timer.stop()
-            self._close_telemetry()
+            try:
+                self._close_telemetry()
+            finally:
+                if self.shadow_backend is not None:
+                    self.shadow_backend.safe_shutdown()
             self.status_label.setText("Ready")
             self._update_device_states()
             self._update_controls()
@@ -2485,7 +2573,7 @@ class SpecMassWindow(QtWidgets.QMainWindow):
     def _stop(self) -> None:
         if self.controller is not None:
             self.controller.stop()
-        if self.backend is not None:
+        if self.backend is not None and self.shadow_backend is None:
             self.backend.safe_shutdown()
         self._update_controls()
 
@@ -2519,13 +2607,19 @@ class SpecMassWindow(QtWidgets.QMainWindow):
         self.flow_value_spin.setValue(self._flow_override_values[channel])
         self.flow_mode_box.blockSignals(False)
         self.flow_value_spin.blockSignals(False)
-        self.flow_info_label.setText(
-            f"Application Ch{channel} = physical Brooks channel {channel + 1}. "
-            "Program writes only when the requested value changes."
-        )
+        if self.shadow_backend is not None:
+            self.flow_info_label.setText(
+                f"Brooks1/{channel}: live measured input; program setpoint is "
+                "calculated and logged, never sent."
+            )
+        else:
+            self.flow_info_label.setText(
+                f"Application Ch{channel} = physical Brooks channel {channel + 1}. "
+                "Program writes only when the requested value changes."
+            )
 
     def _apply_selected_flow(self) -> None:
-        if self.controller is None:
+        if self.controller is None or self.shadow_backend is not None:
             return
         channel = self.flow_list.currentRow()
         if channel < 0:
@@ -2573,11 +2667,32 @@ class SpecMassWindow(QtWidgets.QMainWindow):
         )
 
     def _update_filament(self, program: ProcessProgram) -> None:
+        if self.shadow_backend is not None:
+            self.f1_lamp.set_state("disabled")
+            self.f2_lamp.set_state("disabled")
+            return
         filament = str(program.scan_settings.get("Filament", "")).upper()
         self.f1_lamp.set_state("running" if filament == "F1" else "disabled")
         self.f2_lamp.set_state("running" if filament == "F2" else "disabled")
 
     def _update_device_states(self, *, error: bool = False) -> None:
+        if self.shadow_backend is not None:
+            monitored_devices = set(self.shadow_backend.monitored_devices)
+            for name, label in self._device_state_labels.items():
+                if name in monitored_devices:
+                    if error:
+                        state = "Error"
+                    elif self._running:
+                        state = "Shadow Running"
+                    else:
+                        state = "Read Only"
+                    lamp_state = "error" if error else "running"
+                else:
+                    state = "Disabled"
+                    lamp_state = "disabled"
+                label.setText(state)
+                self._device_lamps[name].set_state(lamp_state)
+            return
         if self.monitor_backend is not None:
             monitored_devices = set(
                 getattr(self.monitor_backend, "monitored_devices", ("ADAM4118",))
@@ -2653,7 +2768,10 @@ class SpecMassWindow(QtWidgets.QMainWindow):
         )
         self.stop_button.setEnabled(self._running)
         self.continue_button.setEnabled(can_continue)
-        self.apply_flows_button.setEnabled(self.program is not None)
+        manual_flow_controls = self.program is not None and self.shadow_backend is None
+        self.apply_flows_button.setEnabled(manual_flow_controls)
+        self.flow_mode_box.setEnabled(manual_flow_controls)
+        self.flow_value_spin.setEnabled(manual_flow_controls)
         self.wait_for_cooling_check.setEnabled(not self._running)
         self.cooling_spin.setEnabled(
             not self._running and self.wait_for_cooling_check.isChecked()
@@ -2750,6 +2868,14 @@ def main() -> int:
         action="store_true",
         help="read and plot ADAM4118 temperatures and Brooks flows without enabling actuators",
     )
+    monitor_group.add_argument(
+        "--shadow-run",
+        action="store_true",
+        help=(
+            "execute a program over live ADAM4118/Brooks reads while calculating "
+            "and logging, but never sending, output commands"
+        ),
+    )
     parser.add_argument("--builds", type=Path, help="folder containing MassSpec.exe and data")
     parser.add_argument(
         "--monitor-output",
@@ -2768,12 +2894,15 @@ def main() -> int:
     )
     args = parser.parse_args()
     monitor_requested = args.temperature_monitor or args.hardware_monitor
-    if monitor_requested and args.builds is None:
-        parser.error("a hardware monitor requires --builds")
-    if monitor_requested and not args.allow_read_hardware:
-        parser.error("a hardware monitor requires --allow-read-hardware")
+    hardware_requested = monitor_requested or args.shadow_run
+    if hardware_requested and args.builds is None:
+        parser.error("a hardware monitor or shadow run requires --builds")
+    if hardware_requested and not args.allow_read_hardware:
+        parser.error("a hardware monitor or shadow run requires --allow-read-hardware")
     if monitor_requested and args.program is not None:
         parser.error("a hardware monitor cannot be combined with --program")
+    if args.shadow_run and args.program is None:
+        parser.error("a shadow run requires --program")
     if args.monitor_output is not None and not monitor_requested:
         parser.error("--monitor-output requires --temperature-monitor or --hardware-monitor")
     if args.monitor_duration is not None:
@@ -2789,10 +2918,15 @@ def main() -> int:
     application.setApplicationName("SpecMass Python")
     application.setStyle("Fusion")
     monitor_backend = None
+    shadow_backend = None
     monitor_telemetry = None
-    if monitor_requested:
+    if hardware_requested:
         try:
-            if args.hardware_monitor:
+            if args.shadow_run:
+                shadow_backend = HardwareShadowBackend(
+                    _create_hardware_monitor(args.builds)
+                )
+            elif args.hardware_monitor:
                 monitor_backend = _create_hardware_monitor(args.builds)
             else:
                 monitor_backend = _create_adam4118_monitor(args.builds)
@@ -2802,13 +2936,18 @@ def main() -> int:
                     monitor_backend,
                 )
         except Exception as exc:
-            if monitor_backend is not None:
+            if shadow_backend is not None:
+                shadow_backend.safe_shutdown()
+            elif monitor_backend is not None:
                 monitor_backend.safe_shutdown()
-            QtWidgets.QMessageBox.critical(None, "Cannot configure hardware monitor", str(exc))
+            QtWidgets.QMessageBox.critical(
+                None, "Cannot configure hardware read mode", str(exc)
+            )
             return 2
     window = SpecMassWindow(
         initial_program=args.program,
         monitor_backend=monitor_backend,
+        shadow_backend=shadow_backend,
         monitor_telemetry=monitor_telemetry,
         monitor_output=args.monitor_output,
         builds_directory=args.builds,

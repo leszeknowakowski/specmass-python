@@ -47,6 +47,12 @@ class SpecMassRuntime:
             else:
                 self.pid.reset()
             command = replace(command, heater_percent=heater)
+            if not getattr(self.backend, "output_writes_enabled", True):
+                command = replace(
+                    command,
+                    flow_write_enabled=(False,) * len(command.flow_setpoints),
+                    flow_write_performed=(False,) * len(command.flow_setpoints),
+                )
             self.safety.validate_command(command)
             self.backend.apply(command, dt_seconds)
             performed = getattr(self.backend, "last_flow_writes", ())
