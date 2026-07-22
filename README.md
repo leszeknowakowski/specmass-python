@@ -186,4 +186,5 @@ python -m specmass.ui --hardware-monitor --builds "D:\_SpecMass\Builds" --allow-
 TDMS preserves the legacy `Temperature/Temperature`,
 `Temperature/Temperature2`, and `Flows/Ch0` through `Ch3` paths while adding
 exact elapsed and UTC time channels. Close the GUI normally to finalize a TDMS
-file.
+file. For a bounded unattended check, `--monitor-duration 60` closes the monitor
+normally after one minute.

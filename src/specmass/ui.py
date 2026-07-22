@@ -1074,6 +1074,11 @@ def main() -> int:
         help="optional new .csv or .tdms file for read-only monitor samples",
     )
     parser.add_argument(
+        "--monitor-duration",
+        type=float,
+        help="optional monitor duration in seconds before a normal automatic close",
+    )
+    parser.add_argument(
         "--allow-read-hardware",
         action="store_true",
         help="explicitly permit read-only ADAM4118 and/or Brooks serial queries",
@@ -1088,6 +1093,11 @@ def main() -> int:
         parser.error("a hardware monitor cannot be combined with --program")
     if args.monitor_output is not None and not monitor_requested:
         parser.error("--monitor-output requires --temperature-monitor or --hardware-monitor")
+    if args.monitor_duration is not None:
+        if not monitor_requested:
+            parser.error("--monitor-duration requires a hardware monitor mode")
+        if args.monitor_duration <= 0:
+            parser.error("--monitor-duration must be positive")
 
     QtWidgets.QApplication.setAttribute(QtCore.Qt.AA_EnableHighDpiScaling, True)
     QtWidgets.QApplication.setAttribute(QtCore.Qt.AA_UseHighDpiPixmaps, True)
@@ -1120,6 +1130,8 @@ def main() -> int:
         monitor_output=args.monitor_output,
     )
     window.show()
+    if args.monitor_duration is not None:
+        QtCore.QTimer.singleShot(max(1, int(args.monitor_duration * 1000)), window.close)
     return int(application.exec_())
 
 
