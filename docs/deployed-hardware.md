@@ -143,3 +143,11 @@ file with 11 complete samples. Consecutive sample intervals were 0.990-1.042 s;
 both temperature channels and all four flow channels contained live values.
 Every `WriteEnabled` and `WritePerformed` sample was zero, and the root metadata
 reported `SpecMass_OutputCommandsEnabled=0`.
+
+A subsequent operator-observed stability run produced 1,503 complete CSV rows
+over 1,501.93 s (25.03 min). Timestamps were strictly increasing with a median
+1.0000 s interval, maximum 1.1013 s interval, and no gap over 1.5 s. There were
+no missing or non-finite sensor values. Touching the primary thermocouple
+produced a clear 24.5 to 34.4 degrees C excursion lasting about 89 s, while
+Temperature2 and the four Brooks baselines remained stable. Heater output and
+every flow write-enabled/write-performed field remained zero for the full run.

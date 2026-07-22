@@ -127,6 +127,11 @@ a bounded offscreen GUI run. The resulting TDMS file round-tripped through
 npTDMS with complete temperature and flow series, approximately one-second
 sample spacing, and zero values in every write-enabled/write-performed channel.
 
+The longer live CSV validation also passed: 1,503 samples over 25.03 minutes,
+no missing/non-finite readings, no acquisition gap above 1.11 seconds, and a
+clearly isolated thermocouple-touch excursion. All actuator fields remained
+disabled/zero throughout the recording.
+
 ## Instrument inventory correction
 
 The zero-I/O report made on the instrument computer shows that its active Hiden
