@@ -82,7 +82,16 @@ class ProcessController:
     def start(self, timestamp: float) -> None:
         if self.program is None or self.state is not MSMState.READY_FOR_START:
             raise RuntimeError("A loaded program in READY_FOR_START is required")
+        # A completed run leaves the controller pointing at its final stage.
+        # Reset only transient run progress here so the loaded program can be
+        # started again without discarding manual/external flow configuration.
+        self.stage_index = None
         self._process_started_at = timestamp
+        self._stage_started_at = None
+        self._stable_since = None
+        self._force_continue = False
+        self._waiting_for_confirmation = False
+        self.fault = None
         self.state = MSMState.PRE_START
         self._completed = False
 

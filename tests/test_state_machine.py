@@ -34,6 +34,28 @@ class StateMachineTests(unittest.TestCase):
         self.assertIs(controller.state, MSMState.READY_FOR_START)
         self.assertTrue(controller.status(1.7).completed)
 
+    def test_completed_program_can_start_again_without_reload(self):
+        controller = ProcessController()
+        controller.load(ProcessProgram((make_stage("one"),)))
+
+        controller.start(0.0)
+        for timestamp in (0.0, 0.1, 0.2, 1.3, 1.4, 1.5, 1.6, 1.7):
+            controller.tick(snapshot(timestamp))
+        self.assertIs(controller.state, MSMState.READY_FOR_START)
+        self.assertEqual(controller.stage_index, 0)
+
+        controller.start(10.0)
+        for timestamp in (10.0, 10.1, 10.2):
+            controller.tick(snapshot(timestamp))
+        self.assertIs(controller.state, MSMState.RUNNING_STAGE)
+        self.assertEqual(controller.stage_index, 0)
+        self.assertFalse(controller.status(10.2).completed)
+
+        for timestamp in (11.3, 11.4, 11.5, 11.6, 11.7):
+            controller.tick(snapshot(timestamp))
+        self.assertIs(controller.state, MSMState.READY_FOR_START)
+        self.assertTrue(controller.status(11.7).completed)
+
     def test_non_auto_stage_waits_for_confirmation(self):
         controller = ProcessController()
         program = ProcessProgram((make_stage("one"), make_stage("two", auto_start=False)))
