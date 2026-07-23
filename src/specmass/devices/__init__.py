@@ -15,10 +15,17 @@ from .adam4118 import (
 from .serial_transport import HardwareDisabledError, PySerialTransaction, SerialSettings
 from .read_only_monitor import ReadOnlyHardwareMonitorBackend
 from .hiden import (
+    HidenAcquisitionCycle,
+    HidenDataStreamParser,
     HidenIdentityCodec,
     HidenIdentityReadOnlyClient,
     HidenProtocolError,
+    HidenScanClient,
+    HidenScanCodec,
+    HidenScanSample,
+    HidenTrendAcquisition,
 )
+from .hardware_shadow import HardwareShadowBackend, HidenHardwareShadowBackend
 
 __all__ = [
     "Adam4118Client",
@@ -32,9 +39,17 @@ __all__ = [
     "ControlCommand",
     "DeviceBackend",
     "HardwareDisabledError",
+    "HardwareShadowBackend",
+    "HidenAcquisitionCycle",
+    "HidenDataStreamParser",
+    "HidenHardwareShadowBackend",
     "HidenIdentityCodec",
     "HidenIdentityReadOnlyClient",
     "HidenProtocolError",
+    "HidenScanClient",
+    "HidenScanCodec",
+    "HidenScanSample",
+    "HidenTrendAcquisition",
     "PySerialTransaction",
     "ReadOnlyHardwareMonitorBackend",
     "SensorSnapshot",

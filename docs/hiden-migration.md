@@ -1,7 +1,8 @@
 # Hiden mass-spectrometer migration boundary
 
-This note records offline evidence only. No COM3 connection was opened and no
-Hiden command was sent while reconstructing this boundary.
+The scan protocol was reconstructed and implemented offline. No COM3 connection
+was opened and no Hiden command was sent while implementing or testing the scan
+path. The earlier, separately approved identity-only query is recorded below.
 
 ## Deployed configuration
 
@@ -62,6 +63,39 @@ identity. The report recorded one identity query and zero initialization,
 standby, filament, scan or other state-change commands. A postflight process
 check confirmed that the one-shot Python process had exited and released COM3.
 
+## Implemented scan execution and acquisition
+
+`HidenScanClient` now reproduces the recovered LabVIEW scan sequence. Before
+changing state it sends `pget name` and requires an exact match with the
+identity in the selected serial-number `.cfg`. It then sends the LabVIEW setup
+preamble, uploads group-1 environment values from the binary DTLG file with the
+program's F1/F2 selection applied, configures every scan row with report 17,
+starts `Ascans`, obtains the job ID, and begins data streaming.
+
+The report-17 parser is incremental: it retains partial serial responses,
+supports scalar trend values and braced linear arrays, verifies each returned
+value count against the configured stimulus axis, rejects instrument errors and
+non-finite numbers, applies the legacy division by relative sensitivity and
+relative gain, and caps its buffer. The main GUI integration deliberately
+accepts only unique single-point mass trend scans for now. Completed cycles are
+mapped to named mass channels, plotted, and logged beside temperature and flow
+data.
+
+Normal completion, an acquisition exception, a failed partial start, and window
+close all use the same best-effort shutdown sequence:
+
+1. `stop <validated job id>` when a job was created;
+2. `data stop`;
+3. `lset mode 0`;
+4. `lset enable 0`;
+5. close COM3.
+
+The GUI exposes this path only when all of `--shadow-run`,
+`--hiden-acquisition`, `--allow-read-hardware`, and `--allow-hiden-control` are
+present. Its banner explicitly says that COM3 scan/filament commands are
+enabled. Furnace heater, VICI valve, ADAM4050, and Brooks setpoint writes remain
+disabled in this milestone.
+
 ## Offline scan editor
 
 The PyQt5 GUI now mirrors the LabVIEW monitor, stage-configuration, and Hiden
@@ -88,7 +122,9 @@ an incompatible `ScanSettings.msdef` representation.
 
 ## Next controlled milestone
 
-The identity milestone is complete. Actual mass acquisition is a later
-milestone requiring a reviewed command sequence, explicit authorization for
-mode/filament/SEM changes, a fail-safe shutdown procedure, and comparison with
-a short known-good LabVIEW scan.
+The implementation and fake-transport verification are complete; physical scan
+validation is not. The next step is one short operator-observed COM3 run with
+LabVIEW and MASsoft closed, a reviewed disposable trend-scan program, and an
+explicit decision to exercise the state-changing sequence. The resulting mass
+values, timing, stop behavior, filament state, and TDMS channels should then be
+compared with a short known-good LabVIEW scan before broader use.

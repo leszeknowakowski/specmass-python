@@ -174,3 +174,19 @@ no missing or non-finite sensor values. Touching the primary thermocouple
 produced a clear 24.5 to 34.4 degrees C excursion lasting about 89 s, while
 Temperature2 and the four Brooks baselines remained stable. Heater output and
 every flow write-enabled/write-performed field remained zero for the full run.
+
+## Hiden acquisition shadow candidate
+
+The next guarded layer can add Hiden acquisition to the already validated
+hardware shadow runner. It requires `--hiden-acquisition` and
+`--allow-hiden-control` in addition to the existing shadow flags. This is a
+state-changing COM3 path: it verifies identity, uploads the binary environment
+and program scan rows, selects the configured filament, starts `Ascans`, and
+polls report-17 data. Heater, VICI/ADAM4050, and Brooks setpoint writes remain
+disabled.
+
+The GUI accepts only single-point mass trend scans for this first integration,
+plots them live, and logs them to `specmass_hiden_shadow_*`. Shutdown attempts
+job stop, data stop, standby, global disable, and COM3 close on every exit path.
+The sequence has comprehensive fake-transport tests but has not yet been run on
+the physical Hiden instrument.

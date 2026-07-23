@@ -1,7 +1,10 @@
 import unittest
 
 from specmass.devices.base import ControlCommand, SensorSnapshot
-from specmass.devices.hardware_shadow import HardwareShadowBackend
+from specmass.devices.hardware_shadow import (
+    HardwareShadowBackend,
+    HidenHardwareShadowBackend,
+)
 from specmass.models import ProcessProgram, ProcessStage, TemperatureMode
 from specmass.pid import PIDController, PIDGains
 from specmass.runtime import SpecMassRuntime
@@ -35,6 +38,27 @@ class FakeReadOnlyHardware:
         raise AssertionError("The shadow wrapper must never call the reader output path")
 
     def safe_shutdown(self) -> None:
+        self.closed = True
+
+
+class FakeMassAcquisition:
+    mass_stimuli = {"H2O": 18.0, "N2": 28.0}
+
+    def __init__(self) -> None:
+        self.active = False
+        self.closed = False
+
+    def start(self) -> str:
+        self.active = True
+        return "HAL RC RGA 201 #16359"
+
+    def read_masses(self) -> dict[str, float]:
+        if not self.active:
+            raise RuntimeError("mass acquisition is not active")
+        return {"H2O": 1.25, "N2": 2.5}
+
+    def safe_shutdown(self) -> None:
+        self.active = False
         self.closed = True
 
 
@@ -113,6 +137,21 @@ class HardwareShadowTests(unittest.TestCase):
         backend.safe_shutdown()
         self.assertTrue(reader.closed)
         self.assertEqual(backend.output_commands_sent, 0)
+
+    def test_hiden_shadow_merges_mass_data_and_closes_both_inputs(self):
+        reader = FakeReadOnlyHardware()
+        acquisition = FakeMassAcquisition()
+        backend = HidenHardwareShadowBackend(reader, acquisition)
+
+        backend.start_acquisition()
+        snapshot = backend.read(2.0)
+        backend.safe_shutdown()
+
+        self.assertEqual(snapshot.masses, {"H2O": 1.25, "N2": 2.5})
+        self.assertEqual(backend.mass_stimuli, {"H2O": 18.0, "N2": 28.0})
+        self.assertIn("MSDevTh", backend.monitored_devices)
+        self.assertTrue(acquisition.closed)
+        self.assertTrue(reader.closed)
 
 
 if __name__ == "__main__":

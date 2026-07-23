@@ -22,6 +22,7 @@ class SerialSettings:
     timeout_seconds: float = 1.0
     write_timeout_seconds: float = 1.0
     read_terminator: bytes = b"\n"
+    reset_input_buffer_before_write: bool = True
 
     def __post_init__(self) -> None:
         if not self.port.strip():
@@ -73,7 +74,8 @@ class PySerialTransaction:
             self.open()
         assert self._serial is not None
         with self._lock:
-            self._serial.reset_input_buffer()
+            if self.settings.reset_input_buffer_before_write:
+                self._serial.reset_input_buffer()
             self._serial.write(request)
             self._serial.flush()
             response = self._serial.read_until(self.settings.read_terminator)

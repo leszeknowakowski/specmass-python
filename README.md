@@ -89,7 +89,7 @@ The header now follows the LabVIEW three-screen workflow:
    added, copied, removed, and edited; changes remain pending until **Save
    program**. Before replacing or removing an existing stage file, Save places
    a recovery copy below the program's `.specmass-backup` folder.
-3. **Environment and scan configuration** is the offline Hiden scan editor.
+3. **Environment and scan configuration** is the file-based Hiden scan editor.
    Select the large `+` button to open the LabVIEW-style four-tab editor:
    **Environment**, **Scan**, **Detector**, and **Advanced**. Scan supports both
    single-mass trend acquisition and linear from/to/step sweeps. Detector
@@ -111,7 +111,8 @@ scan plan, and atomically replaces only the selected program folder's
 `ScanSettings.msdef`. Unsaved changes require Save or Discard before leaving.
 Opening the screen, adding/editing/removing masses, and saving do not open COM3. The
 environment-parameter table is read-only and **Upload to device** is visibly
-disabled until Hiden write commands have been implemented and validated.
+disabled. A saved scan plan is uploaded only when an explicitly authorized
+Hiden acquisition run starts; editing never changes a live instrument.
 The Environment tab in the new-scan dialog is also a read-only reference: the
 copied Hiden manual confirms those values are global live-device state returned
 separately from the scan array. The Advanced tab maps directly to the legacy
@@ -264,11 +265,10 @@ exact elapsed and UTC time channels. Close the GUI normally to finalize a TDMS
 file. For a bounded unattended check, `--monitor-duration 60` closes the monitor
 normally after one minute.
 
-## Offline Hiden scan inspection
+## Hiden scan inspection and acquisition
 
-The Hiden migration currently stops before mass-spectrometer control. The
-deployed connection and a program's `ScanSettings.msdef` can be parsed and
-validated without opening COM3:
+The deployed connection, binary `Builds\16359.cfg` environment, and a program's
+`ScanSettings.msdef` can be parsed and validated without opening COM3:
 
 ```bat
 python -m specmass.hiden --builds "D:\_SpecMass\Builds" --program "D:\path\to\program" --output "hiden-offline.json"
@@ -280,9 +280,30 @@ program contains six single-point SEM scans at masses 18, 28, 30, 32, 44 and
 46 using filament F1.
 
 Mass acquisition is not a passive read. The Hiden scan driver selects an
-operating mode, sets scan and detector parameters, controls the ion beam, and
-may change detector range. A separately gated inventory option contains only
-the isolated `pget name` identity query, with no initialization or scan API,
-but it must not be run on COM3 until a dedicated live-test step is agreed.
-See `docs/hiden-migration.md` for the command boundary reconstructed from the
-copied driver.
+operating mode, uploads the environment and scan/detector parameters, controls
+the selected filament/ion beam, and may change detector range. The implemented
+driver follows the recovered LabVIEW command order, parses incremental report-17
+data, and always attempts scan stop, data stop, standby, filament disable, and
+port close on completion or error.
+
+The first live integration is intentionally a shadow run: Hiden acquisition is
+enabled, while heater, valve, and Brooks setpoint writes remain disabled. It
+requires both Hiden-specific opt-ins:
+
+```bat
+python -m specmass.ui --shadow-run --hiden-acquisition --program "D:\path\to\program" --builds "D:\_SpecMass\Builds" --allow-read-hardware --allow-hiden-control
+```
+
+This mode currently accepts only single-point mass trend rows, which are the
+shape used by the supplied program. Values are plotted live and written to
+`specmass_hiden_shadow_*.tdms` (or `.csv`). The low-level parser supports linear
+report-17 rows, but linear sweep display/storage is not yet connected to the
+main time-series GUI. For safety, the Hiden backend is bound to the program and
+scan plan loaded at application startup; restart the application after editing
+or selecting a different program.
+
+The command is state-changing and has not yet been validated against COM3.
+Before its first controlled run, close LabVIEW and MASsoft, verify the intended
+filament and detector ranges in `ScanSettings.msdef`, and keep an operator at
+the instrument. See `docs/hiden-migration.md` for the recovered sequence and
+shutdown boundary.

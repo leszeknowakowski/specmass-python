@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 import json
 from math import isfinite
 from pathlib import Path
+import struct
 from typing import Any, Mapping, Sequence
 
 from .legacy import load_legacy_json
@@ -51,6 +52,55 @@ class HidenMassDefinition:
     @classmethod
     def from_mapping(cls, data: Mapping[str, Any]) -> "HidenMassDefinition":
         return cls(mass=float(data["Mass"]), name=str(data["Name"]))
+
+
+@dataclass(frozen=True, slots=True)
+class HidenEnvironmentDevice:
+    name: str
+    index: int
+    format_string: str
+    group_membership: int
+    values_by_mode: tuple[float, ...]
+
+    def __post_init__(self) -> None:
+        if not self.name:
+            raise ValueError("Hiden environment device name cannot be empty")
+        if self.index < 0:
+            raise ValueError("Hiden environment device index cannot be negative")
+        if self.format_string not in ("%d", "%.2f"):
+            raise ValueError(
+                f"Unsupported Hiden environment format {self.format_string!r} "
+                f"for {self.name}"
+            )
+        if not self.values_by_mode or not all(isfinite(value) for value in self.values_by_mode):
+            raise ValueError(f"Hiden environment values for {self.name} are invalid")
+
+
+@dataclass(frozen=True, slots=True)
+class HidenEnvironmentConfig:
+    mass_spec_name: str
+    modes: tuple[str, ...]
+    devices: tuple[HidenEnvironmentDevice, ...]
+    autozero_supported: bool
+
+    def __post_init__(self) -> None:
+        if not self.mass_spec_name.strip():
+            raise ValueError("Hiden environment identity cannot be empty")
+        if not self.modes or any(not mode.strip() for mode in self.modes):
+            raise ValueError("Hiden environment must define named operating modes")
+        if not self.devices:
+            raise ValueError("Hiden environment must contain devices")
+        if len({device.name.casefold() for device in self.devices}) != len(self.devices):
+            raise ValueError("Hiden environment contains duplicate device names")
+        if any(len(device.values_by_mode) != len(self.modes) for device in self.devices):
+            raise ValueError("Every Hiden environment device must define every mode")
+
+    @property
+    def normalized_mass_spec_name(self) -> str:
+        text = self.mass_spec_name.strip()
+        if len(text) >= 2 and text[0] == text[-1] and text[0] in ("'", '"'):
+            text = text[1:-1].strip()
+        return text
 
 
 @dataclass(frozen=True, slots=True)
@@ -169,8 +219,12 @@ class HidenScanDefinition:
             raise ValueError("Hiden scan input device cannot be empty")
         if self.increment == 0:
             raise ValueError("Hiden scan increment cannot be zero")
-        if self.relative_sensitivity <= 0 or self.relative_gain <= 0:
-            raise ValueError("Hiden relative sensitivity and gain must be positive")
+        if not 0.001 <= self.relative_sensitivity <= 1000.0:
+            raise ValueError(
+                "Hiden relative sensitivity must be between 0.001 and 1000"
+            )
+        if not 0.001 <= self.relative_gain <= 1000.0:
+            raise ValueError("Hiden relative gain must be between 0.001 and 1000")
         if not 0 <= self.dwell_percent <= 100:
             raise ValueError("Hiden dwell percentage must be between 0 and 100")
         if not 0 <= self.settle_percent <= 100:
@@ -183,10 +237,40 @@ class HidenScanDefinition:
             raise ValueError("Hiden acquisition cycles cannot be negative")
         if self.minimum_cycle_time_seconds < 0:
             raise ValueError("Hiden minimum cycle time cannot be negative")
+        if self.stop_value > self.start_value and self.increment < 0:
+            raise ValueError("Hiden scan increment must be positive for an increasing scan")
+        if self.stop_value < self.start_value and self.increment > 0:
+            raise ValueError("Hiden scan increment must be negative for a decreasing scan")
+        for label, value in (
+            ("device", self.device_to_scan),
+            ("input device", self.input_device),
+            ("options", self.options),
+            ("environment changes", self.environment_changes),
+        ):
+            _validate_hiden_command_text(
+                value,
+                label=label,
+                allow_empty=label not in ("device", "input device"),
+            )
 
     @property
     def is_single_point(self) -> bool:
         return self.start_value == self.stop_value
+
+    def stimuli(self) -> tuple[float, ...]:
+        if self.is_single_point:
+            return (self.start_value,)
+        span = (self.stop_value - self.start_value) / self.increment
+        point_count = int(round(span)) + 1
+        if point_count < 2 or point_count > 1_000_000:
+            raise ValueError(f"Hiden scan contains an invalid point count: {point_count}")
+        endpoint = self.start_value + (point_count - 1) * self.increment
+        tolerance = max(1e-9, abs(self.increment) * 1e-6)
+        if abs(endpoint - self.stop_value) > tolerance:
+            raise ValueError(
+                "Hiden scan range must be an integer number of increments"
+            )
+        return tuple(self.start_value + index * self.increment for index in range(point_count))
 
     @classmethod
     def from_mapping(cls, data: Mapping[str, Any]) -> "HidenScanDefinition":
@@ -222,6 +306,16 @@ class HidenScanPlan:
             raise ValueError(f"Unknown Hiden filament selection: {self.filament!r}")
         if not self.scans:
             raise ValueError("A Hiden scan plan must contain at least one scan")
+        if len({scan.acquisition_cycles for scan in self.scans}) != 1:
+            raise ValueError(
+                "Every Hiden scan row must use the same acquisition cycle count"
+            )
+        if len(
+            {scan.minimum_cycle_time_seconds for scan in self.scans}
+        ) != 1:
+            raise ValueError(
+                "Every Hiden scan row must use the same minimum cycle time"
+            )
 
     @classmethod
     def from_mapping(cls, data: Mapping[str, Any]) -> "HidenScanPlan":
@@ -319,6 +413,102 @@ def load_hiden_scan_plan(program_directory: str | Path) -> HidenScanPlan:
     return HidenScanPlan.from_mapping(raw)
 
 
+def load_hiden_environment_config(path: str | Path) -> HidenEnvironmentConfig:
+    """Read the LabVIEW DTLG environment cache written by the Hiden driver."""
+    source = Path(path)
+    data = source.read_bytes()
+    if len(data) < 20 or data[:4] != b"DTLG":
+        raise ValueError(f"Hiden environment is not a LabVIEW DTLG file: {source}")
+    descriptor_end = struct.unpack_from(">I", data, 12)[0]
+    if descriptor_end + 4 > len(data):
+        raise ValueError(f"Hiden environment descriptor is truncated: {source}")
+    data_offset = struct.unpack_from(">I", data, descriptor_end)[0]
+    reader = _HidenDatalogReader(data, data_offset, source)
+
+    names = reader.strings("device names")
+    indices = reader.integers("device indices")
+    reader.strings("device units")
+    reader.floats("device minima")
+    reader.floats("device maxima")
+    reader.floats("device resolutions")
+    rows, columns, values = reader.float_matrix("values by mode")
+    modes = reader.strings("operating modes")
+    formats = reader.strings("device formats")
+    memberships = reader.bytes("group memberships")
+    autozero_supported = reader.boolean("autozero support")
+    mass_spec_name = reader.string("mass spectrometer name")
+
+    device_count = len(names)
+    lengths = {
+        "indices": len(indices),
+        "matrix rows": rows,
+        "formats": len(formats),
+        "memberships": len(memberships),
+    }
+    mismatched = {label: count for label, count in lengths.items() if count != device_count}
+    if mismatched:
+        raise ValueError(
+            f"Hiden environment arrays do not match {device_count} devices: {mismatched}"
+        )
+    if columns != len(modes):
+        raise ValueError(
+            f"Hiden environment matrix has {columns} modes but names {len(modes)}"
+        )
+
+    devices = tuple(
+        HidenEnvironmentDevice(
+            name=names[index],
+            index=indices[index],
+            format_string=formats[index],
+            group_membership=memberships[index],
+            values_by_mode=tuple(values[index]),
+        )
+        for index in range(device_count)
+    )
+    return HidenEnvironmentConfig(
+        mass_spec_name=mass_spec_name,
+        modes=tuple(modes),
+        devices=devices,
+        autozero_supported=autozero_supported,
+    )
+
+
+def find_hiden_environment_config(builds_directory: str | Path) -> Path:
+    root = Path(builds_directory)
+    candidates = sorted(
+        path
+        for path in root.glob("*.cfg")
+        if path.is_file() and path.stem.isdigit()
+    )
+    if not candidates:
+        raise FileNotFoundError(
+            f"No serial-number Hiden environment .cfg exists in {root}"
+        )
+    if len(candidates) > 1:
+        names = ", ".join(path.name for path in candidates)
+        raise ValueError(
+            f"Multiple Hiden environment files exist in {root}; cannot choose safely: {names}"
+        )
+    return candidates[0]
+
+
+def hiden_mass_stimuli(
+    plan: HidenScanPlan,
+    *,
+    names_by_mass: Mapping[float, str] | None = None,
+) -> dict[str, float]:
+    names = DEFAULT_HIDEN_MASS_NAMES if names_by_mass is None else names_by_mass
+    result: dict[str, float] = {}
+    for scan in plan.scans:
+        if scan.device_to_scan.casefold() != "mass" or not scan.is_single_point:
+            continue
+        name = names.get(scan.start_value, f"Mass[{scan.start_value:g}]")
+        if name in result:
+            raise ValueError(f"Duplicate live Hiden mass label: {name}")
+        result[name] = scan.start_value
+    return result
+
+
 def build_hiden_offline_report(
     builds_directory: str | Path,
     *,
@@ -372,6 +562,91 @@ def _mapping_sequence(value: Any, label: str) -> tuple[Mapping[str, Any], ...]:
             raise ValueError(f"{label}[{index}] must be an object")
         result.append(item)
     return tuple(result)
+
+
+def _validate_hiden_command_text(
+    value: str,
+    *,
+    label: str,
+    allow_empty: bool,
+) -> None:
+    if not value and allow_empty:
+        return
+    if not value:
+        raise ValueError(f"Hiden scan {label} cannot be empty")
+    try:
+        encoded = value.encode("ascii")
+    except UnicodeEncodeError as exc:
+        raise ValueError(f"Hiden scan {label} must contain ASCII only") from exc
+    if any(byte < 32 or byte == 127 for byte in encoded):
+        raise ValueError(f"Hiden scan {label} contains a control character")
+
+
+class _HidenDatalogReader:
+    def __init__(self, data: bytes, offset: int, source: Path) -> None:
+        if offset < 0 or offset > len(data):
+            raise ValueError(f"Invalid Hiden DTLG data offset in {source}")
+        self.data = data
+        self.offset = offset
+        self.source = source
+
+    def _take(self, size: int, label: str) -> bytes:
+        end = self.offset + size
+        if size < 0 or end > len(self.data):
+            raise ValueError(f"Truncated Hiden environment {label}: {self.source}")
+        result = self.data[self.offset:end]
+        self.offset = end
+        return result
+
+    def _count(self, label: str) -> int:
+        count = struct.unpack(">I", self._take(4, f"{label} count"))[0]
+        if count > 1_000_000:
+            raise ValueError(f"Unreasonable Hiden environment {label} count: {count}")
+        return count
+
+    def string(self, label: str) -> str:
+        size = self._count(label)
+        try:
+            return self._take(size, label).decode("ascii")
+        except UnicodeDecodeError as exc:
+            raise ValueError(f"Hiden environment {label} is not ASCII") from exc
+
+    def strings(self, label: str) -> tuple[str, ...]:
+        return tuple(self.string(f"{label}[{index}]") for index in range(self._count(label)))
+
+    def integers(self, label: str) -> tuple[int, ...]:
+        count = self._count(label)
+        raw = self._take(count * 4, label)
+        return tuple(struct.unpack(f">{count}i", raw))
+
+    def floats(self, label: str) -> tuple[float, ...]:
+        count = self._count(label)
+        raw = self._take(count * 8, label)
+        return tuple(struct.unpack(f">{count}d", raw))
+
+    def float_matrix(
+        self, label: str
+    ) -> tuple[int, int, tuple[tuple[float, ...], ...]]:
+        rows = self._count(f"{label} rows")
+        columns = self._count(f"{label} columns")
+        if rows and columns > 1_000_000 // rows:
+            raise ValueError(f"Unreasonable Hiden environment {label} shape")
+        raw = self._take(rows * columns * 8, label)
+        flat = struct.unpack(f">{rows * columns}d", raw)
+        values = tuple(
+            tuple(flat[row * columns : (row + 1) * columns])
+            for row in range(rows)
+        )
+        return rows, columns, values
+
+    def bytes(self, label: str) -> tuple[int, ...]:
+        return tuple(self._take(self._count(label), label))
+
+    def boolean(self, label: str) -> bool:
+        raw = self._take(1, label)[0]
+        if raw not in (0, 1):
+            raise ValueError(f"Invalid Hiden environment boolean {label}: {raw}")
+        return bool(raw)
 
 
 def main() -> int:

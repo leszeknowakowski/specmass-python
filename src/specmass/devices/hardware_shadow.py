@@ -1,9 +1,24 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from pathlib import Path
+from typing import Mapping, Protocol
 
 from .base import ControlCommand, SensorSnapshot
 from .read_only_monitor import ReadOnlyHardwareMonitorBackend
+
+
+class MassAcquisition(Protocol):
+    mass_stimuli: dict[str, float]
+
+    @property
+    def active(self) -> bool: ...
+
+    def start(self) -> str: ...
+
+    def read_masses(self) -> Mapping[str, float]: ...
+
+    def safe_shutdown(self) -> None: ...
 
 
 class HardwareShadowBackend:
@@ -28,6 +43,9 @@ class HardwareShadowBackend:
     def read(self, timestamp: float) -> SensorSnapshot:
         return self.reader.read(timestamp)
 
+    def start_acquisition(self) -> None:
+        """No-op for the read-only shadow mode without a mass spectrometer."""
+
     def apply(self, command: ControlCommand, dt_seconds: float) -> None:
         if dt_seconds <= 0:
             raise ValueError("Shadow timestep must be positive")
@@ -43,3 +61,42 @@ class HardwareShadowBackend:
 
     def safe_shutdown(self) -> None:
         self.reader.safe_shutdown()
+
+
+class HidenHardwareShadowBackend(HardwareShadowBackend):
+    """Read ADAM/Brooks live and execute only the explicitly enabled Hiden scan."""
+
+    hiden_commands_enabled = True
+
+    def __init__(
+        self,
+        reader: ReadOnlyHardwareMonitorBackend,
+        mass_acquisition: MassAcquisition,
+        *,
+        program_directory: str | Path | None = None,
+        scan_plan: object | None = None,
+    ) -> None:
+        super().__init__(reader)
+        self.mass_acquisition = mass_acquisition
+        self.mass_stimuli = dict(mass_acquisition.mass_stimuli)
+        self.program_directory = (
+            Path(program_directory).resolve()
+            if program_directory is not None
+            else None
+        )
+        self.scan_plan = scan_plan
+        self.monitored_devices = (*reader.monitored_devices, "MSDevTh")
+
+    def start_acquisition(self) -> None:
+        self.mass_acquisition.start()
+
+    def read(self, timestamp: float) -> SensorSnapshot:
+        snapshot = super().read(timestamp)
+        masses = self.mass_acquisition.read_masses()
+        return replace(snapshot, masses=dict(masses))
+
+    def safe_shutdown(self) -> None:
+        try:
+            self.mass_acquisition.safe_shutdown()
+        finally:
+            super().safe_shutdown()

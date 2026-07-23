@@ -162,9 +162,13 @@ using F1, with autozero only on the first point.
 
 Offline extraction of temporary copies of the bundled Hiden VIs established
 that normal scan and partial-pressure acquisition change operating mode,
-devices, ion-beam state and potentially detector range. It therefore cannot be
-added to the existing passive hardware monitor. Only the isolated `pget name`
-identity query has been implemented, in a client with no initialization or
-state-changing method. The approved one-shot COM3 test returned the expected
-`HAL RC RGA 201 #16359` identity, recorded zero state-changing commands, and
-released the port normally. Detailed evidence is in `docs/hiden-migration.md`.
+devices, ion-beam state and potentially detector range. It therefore is not
+part of the passive hardware monitor. The approved one-shot `pget name` test
+returned `HAL RC RGA 201 #16359` and released COM3 normally.
+
+A separately gated scan client now reproduces the legacy configuration/start/
+report-17/stop sequence and parses the binary serial-number environment file.
+The GUI can merge single-point trend masses into the shadow runner while all
+non-Hiden actuator writes remain masked. The driver and failure shutdown paths
+are fake-transport tested, but this state-changing scan path has not yet been
+run against COM3. Detailed evidence is in `docs/hiden-migration.md`.

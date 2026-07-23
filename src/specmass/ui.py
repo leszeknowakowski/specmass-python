@@ -17,7 +17,8 @@ from PyQt5 import QtCore, QtGui, QtWidgets
 from .devices.adam4118 import Adam4118Client, Adam4118MonitorBackend
 from .devices.base import ControlCommand
 from .devices.brooks0254 import Brooks0254ReadOnlyClient
-from .devices.hardware_shadow import HardwareShadowBackend
+from .devices.hardware_shadow import HardwareShadowBackend, HidenHardwareShadowBackend
+from .devices.hiden import HidenScanClient, HidenTrendAcquisition
 from .devices.read_only_monitor import ReadOnlyHardwareMonitorBackend
 from .devices.serial_transport import PySerialTransaction, SerialSettings
 from .devices.simulated import SimulatedBackend
@@ -25,8 +26,11 @@ from .hiden import (
     DEFAULT_HIDEN_MASS_NAMES,
     HidenScanDefinition,
     HidenScanPlan,
+    find_hiden_environment_config,
     hiden_scan_label,
     load_hiden_connection,
+    load_hiden_environment_config,
+    load_hiden_scan_plan,
     new_hiden_mass_scan,
 )
 from .legacy import (
@@ -147,6 +151,67 @@ def _create_hardware_monitor(builds_directory: Path) -> ReadOnlyHardwareMonitorB
         )
     except Exception:
         temperature_monitor.safe_shutdown()
+        raise
+
+
+def _create_hiden_hardware_shadow(
+    builds_directory: Path,
+    program_directory: Path,
+) -> HidenHardwareShadowBackend:
+    reader = _create_hardware_monitor(builds_directory)
+    try:
+        connection = load_hiden_connection(builds_directory)
+        if not connection.enabled:
+            raise ValueError("MSDevTh EnableMS is false; Hiden acquisition is disabled")
+        if connection.connection_type != 0:
+            raise ValueError(
+                "This milestone supports the deployed serial Hiden connection only"
+            )
+        if connection.resource.strip().upper() != "COM3":
+            raise ValueError(
+                "The guarded Hiden milestone is locked to the inventoried COM3 "
+                f"device, not {connection.resource!r}"
+            )
+        if (
+            connection.parity_name != "none"
+            or connection.data_bits != 8
+            or connection.stop_bits != 1.0
+        ):
+            raise ValueError(
+                "The Hiden serial connection must use 8 data bits, no parity, "
+                "1 stop bit"
+            )
+        environment = load_hiden_environment_config(
+            find_hiden_environment_config(builds_directory)
+        )
+        plan = load_hiden_scan_plan(program_directory)
+        timeout_seconds = max(0.001, connection.timeout_ms / 1000.0)
+        transport = PySerialTransaction(
+            SerialSettings(
+                port=connection.resource,
+                baudrate=connection.baud_rate,
+                timeout_seconds=timeout_seconds,
+                write_timeout_seconds=timeout_seconds,
+                read_terminator=b"\n",
+                # Report-17 data can span several `data` responses.
+                reset_input_buffer_before_write=False,
+            ),
+            hardware_enabled=True,
+        )
+        client = HidenScanClient(transport, environment)
+        acquisition = HidenTrendAcquisition(
+            client,
+            plan,
+            names_by_mass={item.mass: item.name for item in connection.masses},
+        )
+        return HidenHardwareShadowBackend(
+            reader,
+            acquisition,
+            program_directory=program_directory,
+            scan_plan=plan,
+        )
+    except Exception:
+        reader.safe_shutdown()
         raise
 
 
@@ -791,7 +856,7 @@ class SpecMassWindow(QtWidgets.QMainWindow):
         *,
         initial_program: Path | None = None,
         monitor_backend: Adam4118MonitorBackend | ReadOnlyHardwareMonitorBackend | None = None,
-        shadow_backend: HardwareShadowBackend | None = None,
+        shadow_backend: HardwareShadowBackend | HidenHardwareShadowBackend | None = None,
         monitor_telemetry: TelemetryWriter | None = None,
         monitor_output: Path | None = None,
         builds_directory: Path | None = None,
@@ -803,7 +868,9 @@ class SpecMassWindow(QtWidgets.QMainWindow):
 
         self.program: ProcessProgram | None = None
         self.program_path: Path | None = None
-        self.backend: SimulatedBackend | HardwareShadowBackend | None = None
+        self.backend: (
+            SimulatedBackend | HardwareShadowBackend | HidenHardwareShadowBackend | None
+        ) = None
         self.controller: ProcessController | None = None
         self.runtime: SpecMassRuntime | None = None
         self.telemetry: TelemetryWriter | None = monitor_telemetry
@@ -2231,22 +2298,43 @@ class SpecMassWindow(QtWidgets.QMainWindow):
             self._show_program_config()
 
     def _configure_shadow_mode(self) -> None:
-        self.setWindowTitle("Mass Spectrometer Station — SpecMass hardware shadow run")
-        self.mode_banner.setText(
-            "HARDWARE SHADOW RUN — LIVE ADAM4118/BROOKS READS; "
-            "HEATER, VALVE, FLOW, AND HIDEN WRITES DISABLED"
+        hiden_enabled = bool(
+            getattr(self.shadow_backend, "hiden_commands_enabled", False)
         )
+        if hiden_enabled:
+            self.setWindowTitle(
+                "Mass Spectrometer Station — SpecMass Hiden acquisition shadow run"
+            )
+            self.mode_banner.setText(
+                "HIDEN ACQUISITION SHADOW RUN — COM3 SCAN/FILAMENT COMMANDS ENABLED; "
+                "HEATER, VALVE, AND FLOW OUTPUTS DISABLED"
+            )
+        else:
+            self.setWindowTitle(
+                "Mass Spectrometer Station — SpecMass hardware shadow run"
+            )
+            self.mode_banner.setText(
+                "HARDWARE SHADOW RUN — LIVE ADAM4118/BROOKS READS; "
+                "HEATER, VALVE, FLOW, AND HIDEN WRITES DISABLED"
+            )
         self.mode_banner.setStyleSheet(
             "background:#fff4cc; color:#714b00; font-weight:700; padding:4px;"
         )
-        self.wait_for_cooling_check.setToolTip(
-            "Continue live read-only monitoring and shadow logging until the measured "
-            "furnace temperature reaches this threshold. No output is sent."
-        )
+        if hiden_enabled:
+            self.wait_for_cooling_check.setToolTip(
+                "Continue live monitoring, Hiden acquisition, and shadow logging until "
+                "the measured furnace temperature reaches this threshold. Heater, "
+                "valve, and flow outputs remain disabled."
+            )
+        else:
+            self.wait_for_cooling_check.setToolTip(
+                "Continue live read-only monitoring and shadow logging until the measured "
+                "furnace temperature reaches this threshold. No output is sent."
+            )
 
     def _backend_for_program(
         self, flow_counts: tuple[int, ...]
-    ) -> SimulatedBackend | HardwareShadowBackend:
+    ) -> SimulatedBackend | HardwareShadowBackend | HidenHardwareShadowBackend:
         flow_count = max(flow_counts, default=0)
         if self.shadow_backend is None:
             return SimulatedBackend(flow_channels=flow_count)
@@ -2259,6 +2347,28 @@ class SpecMassWindow(QtWidgets.QMainWindow):
                 f"Brooks channels; stage channel counts are {flow_counts}."
             )
         return self.shadow_backend
+
+    def _validate_hiden_program_binding(self, path: Path) -> None:
+        if not getattr(self.shadow_backend, "hiden_commands_enabled", False):
+            return
+        assert self.shadow_backend is not None
+        expected_directory = getattr(
+            self.shadow_backend,
+            "program_directory",
+            None,
+        )
+        if expected_directory is not None and path.resolve() != expected_directory:
+            raise ValueError(
+                "Hiden acquisition is locked to the program selected on the command "
+                "line. Close the application and restart it with the other program."
+            )
+        expected_plan = getattr(self.shadow_backend, "scan_plan", None)
+        if expected_plan is not None and load_hiden_scan_plan(path) != expected_plan:
+            raise ValueError(
+                "ScanSettings.msdef changed after Hiden acquisition was prepared. "
+                "Close and restart the application so the guarded COM3 driver uses "
+                "the reviewed scan plan."
+            )
 
     def _start_hardware_monitor(self) -> None:
         assert self.monitor_backend is not None
@@ -2358,6 +2468,7 @@ class SpecMassWindow(QtWidgets.QMainWindow):
             return
         try:
             program = load_program(path)
+            self._validate_hiden_program_binding(path)
             flow_counts = tuple(len(stage.start_flows) for stage in program.stages)
             flow_count = max(flow_counts, default=0)
             backend = self._backend_for_program(flow_counts)
@@ -2373,7 +2484,12 @@ class SpecMassWindow(QtWidgets.QMainWindow):
         self.controller.load(program)
         self.runtime = None
         self._program_duration = sum(stage.effective_duration_seconds() for stage in program.stages)
-        self._mass_names = tuple(mass_stimuli_from_scan_settings(program.scan_settings))
+        live_mass_stimuli = getattr(backend, "mass_stimuli", None)
+        self._mass_names = tuple(
+            live_mass_stimuli
+            if live_mass_stimuli is not None
+            else mass_stimuli_from_scan_settings(program.scan_settings)
+        )
         self._scan_settings_working = None
         self._scan_settings_dirty = False
         try:
@@ -2427,9 +2543,12 @@ class SpecMassWindow(QtWidgets.QMainWindow):
             raise RuntimeError("No program folder is loaded")
         normalized_suffix = suffix if suffix.startswith(".") else f".{suffix}"
         stamp = time.strftime("%Y%m%d_%H%M%S")
-        prefix = (
-            "specmass_shadow" if self.shadow_backend is not None else "specmass_sim"
-        )
+        if getattr(self.shadow_backend, "hiden_commands_enabled", False):
+            prefix = "specmass_hiden_shadow"
+        elif self.shadow_backend is not None:
+            prefix = "specmass_shadow"
+        else:
+            prefix = "specmass_sim"
         candidate = self.program_path / f"{prefix}_{stamp}{normalized_suffix}"
         counter = 2
         while candidate.exists():
@@ -2448,10 +2567,22 @@ class SpecMassWindow(QtWidgets.QMainWindow):
             or not self.backend
         ):
             return
+        hiden_enabled = bool(
+            getattr(self.shadow_backend, "hiden_commands_enabled", False)
+        )
         try:
+            if hiden_enabled:
+                self._validate_hiden_program_binding(self.program_path)
             self.controller.cooling_temperature = self._configured_cooling_temperature()
             self.controller.start(0.0)
+            if hiden_enabled:
+                assert self.shadow_backend is not None
+                self.shadow_backend.start_acquisition()
         except Exception as exc:
+            if hiden_enabled and self.shadow_backend is not None:
+                self.shadow_backend.safe_shutdown()
+            self.controller = ProcessController()
+            self.controller.load(self.program)
             QtWidgets.QMessageBox.critical(self, "Cannot start", str(exc))
             return
 
@@ -2461,32 +2592,63 @@ class SpecMassWindow(QtWidgets.QMainWindow):
             if self.shadow_backend is not None
             else ("Temperature",)
         )
-        if importlib.util.find_spec("nptdms") is not None:
-            output_path = self._simulation_output_path(".tdms")
-            root_properties = (
-                {
-                    "SpecMass_Mode": "HardwareShadowRun",
-                    "SpecMass_OutputCommandsEnabled": 0,
-                    "SpecMass_ReadDevices": "ADAM4118,Brooks1",
-                }
-                if self.shadow_backend is not None
-                else None
+        mass_stimuli = dict(
+            getattr(
+                self.shadow_backend,
+                "mass_stimuli",
+                mass_stimuli_from_scan_settings(self.program.scan_settings),
             )
-            self.telemetry = TdmsTelemetryWriter(
-                output_path,
-                flow_channels=flow_count,
-                mass_stimuli=mass_stimuli_from_scan_settings(self.program.scan_settings),
-                nominal_increment_seconds=self.tick_timer.interval() / 1000.0,
-                temperature_names=temperature_names,
-                root_properties=root_properties,
+        )
+        try:
+            if importlib.util.find_spec("nptdms") is not None:
+                output_path = self._simulation_output_path(".tdms")
+                root_properties = (
+                    {
+                        "SpecMass_Mode": (
+                            "HardwareShadowHidenAcquisition"
+                            if hiden_enabled
+                            else "HardwareShadowRun"
+                        ),
+                        "SpecMass_OutputCommandsEnabled": int(hiden_enabled),
+                        "SpecMass_HidenScanCommandsEnabled": int(hiden_enabled),
+                        "SpecMass_HeaterValveFlowWritesEnabled": 0,
+                        "SpecMass_ReadDevices": (
+                            "ADAM4118,Brooks1,MSDevTh"
+                            if hiden_enabled
+                            else "ADAM4118,Brooks1"
+                        ),
+                    }
+                    if self.shadow_backend is not None
+                    else None
+                )
+                self.telemetry = TdmsTelemetryWriter(
+                    output_path,
+                    flow_channels=flow_count,
+                    mass_stimuli=mass_stimuli,
+                    nominal_increment_seconds=self.tick_timer.interval() / 1000.0,
+                    temperature_names=temperature_names,
+                    root_properties=root_properties,
+                )
+            else:
+                output_path = self._simulation_output_path(".csv")
+                self.telemetry = CsvTelemetryWriter(
+                    output_path,
+                    flow_channels=flow_count,
+                    mass_names=self._mass_names,
+                    temperature_names=tuple(
+                        name.lower() for name in temperature_names
+                    ),
+                )
+        except Exception as exc:
+            if hiden_enabled and self.shadow_backend is not None:
+                self.shadow_backend.safe_shutdown()
+            self._close_telemetry()
+            self.controller = ProcessController()
+            self.controller.load(self.program)
+            QtWidgets.QMessageBox.critical(
+                self, "Cannot create run log", str(exc)
             )
-        else:
-            output_path = self._simulation_output_path(".csv")
-            self.telemetry = CsvTelemetryWriter(
-                output_path,
-                flow_channels=flow_count,
-                temperature_names=tuple(name.lower() for name in temperature_names),
-            )
+            return
         self.runtime = SpecMassRuntime(
             backend=self.backend,
             controller=self.controller,
@@ -2503,6 +2665,7 @@ class SpecMassWindow(QtWidgets.QMainWindow):
         self.temperature_plot.clear_data()
         self.flow_plot.clear_data()
         self.mass_plot.clear_data()
+        self._update_filament(self.program)
         self._update_device_states()
         self._update_controls()
         self.tick_timer.start()
@@ -2527,6 +2690,8 @@ class SpecMassWindow(QtWidgets.QMainWindow):
             self.tick_timer.stop()
             self._close_telemetry()
             self.status_label.setText("Error")
+            if self.program is not None:
+                self._update_filament(self.program)
             self._update_device_states(error=True)
             self._update_controls()
             QtWidgets.QMessageBox.critical(self, "Safety stop", str(exc))
@@ -2567,6 +2732,8 @@ class SpecMassWindow(QtWidgets.QMainWindow):
                 if self.shadow_backend is not None:
                     self.shadow_backend.safe_shutdown()
             self.status_label.setText("Ready")
+            if self.program is not None:
+                self._update_filament(self.program)
             self._update_device_states()
             self._update_controls()
 
@@ -2668,6 +2835,15 @@ class SpecMassWindow(QtWidgets.QMainWindow):
 
     def _update_filament(self, program: ProcessProgram) -> None:
         if self.shadow_backend is not None:
+            if getattr(self.shadow_backend, "hiden_commands_enabled", False):
+                filament = str(program.scan_settings.get("Filament", "")).upper()
+                self.f1_lamp.set_state(
+                    "running" if self._running and filament == "F1" else "disabled"
+                )
+                self.f2_lamp.set_state(
+                    "running" if self._running and filament == "F2" else "disabled"
+                )
+                return
             self.f1_lamp.set_state("disabled")
             self.f2_lamp.set_state("disabled")
             return
@@ -2678,10 +2854,15 @@ class SpecMassWindow(QtWidgets.QMainWindow):
     def _update_device_states(self, *, error: bool = False) -> None:
         if self.shadow_backend is not None:
             monitored_devices = set(self.shadow_backend.monitored_devices)
+            hiden_enabled = bool(
+                getattr(self.shadow_backend, "hiden_commands_enabled", False)
+            )
             for name, label in self._device_state_labels.items():
                 if name in monitored_devices:
                     if error:
                         state = "Error"
+                    elif hiden_enabled and name == "MSDevTh":
+                        state = "Scanning" if self._running else "Standby / Closed"
                     elif self._running:
                         state = "Shadow Running"
                     else:
@@ -2873,7 +3054,7 @@ def main() -> int:
         action="store_true",
         help=(
             "execute a program over live ADAM4118/Brooks reads while calculating "
-            "and logging, but never sending, output commands"
+            "and logging, while masking heater, valve, and flow output commands"
         ),
     )
     parser.add_argument("--builds", type=Path, help="folder containing MassSpec.exe and data")
@@ -2892,6 +3073,21 @@ def main() -> int:
         action="store_true",
         help="explicitly permit read-only ADAM4118 and/or Brooks serial queries",
     )
+    parser.add_argument(
+        "--hiden-acquisition",
+        action="store_true",
+        help=(
+            "in shadow-run mode, configure COM3 and acquire the program's Hiden "
+            "single-mass trend scans"
+        ),
+    )
+    parser.add_argument(
+        "--allow-hiden-control",
+        action="store_true",
+        help=(
+            "explicitly permit Hiden scan, filament, operating-mode, and stop commands"
+        ),
+    )
     args = parser.parse_args()
     monitor_requested = args.temperature_monitor or args.hardware_monitor
     hardware_requested = monitor_requested or args.shadow_run
@@ -2903,6 +3099,12 @@ def main() -> int:
         parser.error("a hardware monitor cannot be combined with --program")
     if args.shadow_run and args.program is None:
         parser.error("a shadow run requires --program")
+    if args.hiden_acquisition and not args.shadow_run:
+        parser.error("--hiden-acquisition requires --shadow-run")
+    if args.hiden_acquisition and not args.allow_hiden_control:
+        parser.error("--hiden-acquisition requires --allow-hiden-control")
+    if args.allow_hiden_control and not args.hiden_acquisition:
+        parser.error("--allow-hiden-control requires --hiden-acquisition")
     if args.monitor_output is not None and not monitor_requested:
         parser.error("--monitor-output requires --temperature-monitor or --hardware-monitor")
     if args.monitor_duration is not None:
@@ -2923,9 +3125,15 @@ def main() -> int:
     if hardware_requested:
         try:
             if args.shadow_run:
-                shadow_backend = HardwareShadowBackend(
-                    _create_hardware_monitor(args.builds)
-                )
+                if args.hiden_acquisition:
+                    shadow_backend = _create_hiden_hardware_shadow(
+                        args.builds,
+                        args.program,
+                    )
+                else:
+                    shadow_backend = HardwareShadowBackend(
+                        _create_hardware_monitor(args.builds)
+                    )
             elif args.hardware_monitor:
                 monitor_backend = _create_hardware_monitor(args.builds)
             else:

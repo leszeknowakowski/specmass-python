@@ -11,8 +11,11 @@ try:
     from PyQt5 import QtWidgets
 
     from specmass.devices.base import SensorSnapshot
-    from specmass.devices.hardware_shadow import HardwareShadowBackend
-    from specmass.hiden import new_hiden_mass_scan
+    from specmass.devices.hardware_shadow import (
+        HardwareShadowBackend,
+        HidenHardwareShadowBackend,
+    )
+    from specmass.hiden import HidenScanPlan, new_hiden_mass_scan
     from specmass.legacy import load_legacy_json
     from specmass.ui import MassScanDialog, SpecMassWindow
 except ImportError:
@@ -305,6 +308,68 @@ class ConfigurationGuiTests(unittest.TestCase):
         finally:
             window._stage_settings_dirty = False
             window.close()
+
+    def test_hiden_shadow_is_visibly_state_changing_and_plots_acquired_mass(self):
+        class FakeMassAcquisition:
+            mass_stimuli = {"H2O": 18.0}
+
+            def __init__(self):
+                self.active = False
+                self.closed = False
+
+            def start(self):
+                self.active = True
+                return "HAL RC RGA 201 #16359"
+
+            def read_masses(self):
+                return {"H2O": 1.25}
+
+            def safe_shutdown(self):
+                self.active = False
+                self.closed = True
+
+        reader = Mock()
+        reader.channel_names = ("Temperature", "Temperature2")
+        reader.flow_channel_names = ("Ch0", "Ch1", "Ch2", "Ch3")
+        reader.monitored_devices = ("ADAM4118", "Brooks1")
+        reader.poll_interval_ms = 1000
+        reader.read.side_effect = lambda timestamp: SensorSnapshot(
+            timestamp=timestamp,
+            temperature=24.0,
+            temperatures=(24.0, 25.0),
+            flows=(0.0, 0.0, 0.0, 0.0),
+            masses={},
+        )
+        acquisition = FakeMassAcquisition()
+        saved_scan_settings = load_legacy_json(
+            self.program_path / "ScanSettings.msdef"
+        )
+        shadow = HidenHardwareShadowBackend(
+            reader,
+            acquisition,
+            program_directory=self.program_path,
+            scan_plan=HidenScanPlan.from_mapping(saved_scan_settings),
+        )
+        window = SpecMassWindow(
+            initial_program=self.program_path,
+            shadow_backend=shadow,
+        )
+        try:
+            self.assertIn("COM3 SCAN/FILAMENT COMMANDS ENABLED", window.mode_banner.text())
+            self.assertEqual(window._mass_names, ("H2O",))
+            window._start()
+            window._tick()
+            self.assertTrue(acquisition.active)
+            self.assertEqual(window._device_state_labels["MSDevTh"].text(), "Scanning")
+            self.assertTrue(
+                window.output_label.text().startswith("specmass_hiden_shadow_")
+            )
+            self.assertIn("#52c41a", window.f1_lamp.styleSheet())
+        finally:
+            window._stage_settings_dirty = False
+            window.close()
+        self.assertTrue(acquisition.closed)
+        reader.apply.assert_not_called()
 
 
 if __name__ == "__main__":
