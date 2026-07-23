@@ -261,17 +261,33 @@ class HidenDataStreamParser:
         cursor = frame_start + 1
         samples: list[HidenScanSample] = []
         for scan in self.scan_plan.scans:
-            slash = self._buffer.find("/", cursor)
-            if slash < 0:
+            while (
+                cursor < len(self._buffer)
+                and self._buffer[cursor] in " \t\r\n,"
+            ):
+                cursor += 1
+            if cursor >= len(self._buffer):
                 return None
-            elapsed_text = self._buffer[cursor:slash].strip(" \t\r\n,]")
-            match = re.search(r"(-?\d+)\s*$", elapsed_text)
-            if match is None:
+            if self._buffer[cursor] != "/":
+                context = self._buffer[frame_start : frame_start + 120]
                 raise HidenProtocolError(
-                    f"Invalid Hiden elapsed-time field: {elapsed_text!r}"
+                    "Hiden report-17 data is missing '/' before elapsed time: "
+                    f"{context!r}"
                 )
-            elapsed = int(match.group(1))
-            cursor = slash + 1
+            cursor += 1
+            elapsed_end = self._buffer.find("/", cursor)
+            if elapsed_end < 0:
+                return None
+            elapsed_text = self._buffer[cursor:elapsed_end].strip()
+            match = re.fullmatch(r"-?\d+", elapsed_text)
+            if match is None:
+                context = self._buffer[frame_start : frame_start + 120]
+                raise HidenProtocolError(
+                    f"Invalid Hiden elapsed-time field {elapsed_text!r}: "
+                    f"{context!r}"
+                )
+            elapsed = int(elapsed_text)
+            cursor = elapsed_end + 1
             while cursor < len(self._buffer) and self._buffer[cursor] in " \t\r\n":
                 cursor += 1
             if cursor >= len(self._buffer):

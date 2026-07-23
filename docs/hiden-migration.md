@@ -73,10 +73,11 @@ program's F1/F2 selection applied, configures every scan row with report 17,
 starts `Ascans`, obtains the job ID, and begins data streaming.
 
 The report-17 parser is incremental: it retains partial serial responses,
-supports scalar trend values and braced linear arrays, verifies each returned
-value count against the configured stimulus axis, rejects instrument errors and
-non-finite numbers, applies the legacy division by relative sensitivity and
-relative gain, and caps its buffer. The main GUI integration deliberately
+decodes the driver's `/elapsed-time/data` records, supports scalar trend values
+and braced linear arrays, verifies each returned value count against the
+configured stimulus axis, rejects instrument errors and non-finite numbers,
+applies the legacy division by relative sensitivity and relative gain, and caps
+its buffer. The main GUI integration deliberately
 accepts only unique single-point mass trend scans for now. Completed cycles are
 mapped to named mass channels, plotted, and logged beside temperature and flow
 data.
@@ -134,3 +135,10 @@ the instrument rejected `sset row 0` with `C042`; no acquisition began. This
 confirmed that the deployed unit uses the same one-based row numbering shown by
 the LabVIEW scan editor. The driver now emits rows 1 through N and rejects row
 zero locally. A controlled retry remains required.
+
+The next retry passed scan configuration and started acquisition, then exposed
+the report-17 record prefix: the deployed stream writes elapsed time as
+`/elapsed/`, exactly as annotated in the LabVIEW block diagram. The original
+Python parser expected `elapsed/` and therefore reported an empty field. It now
+requires and consumes both slash delimiters and includes a bounded raw frame
+fragment in future framing errors.

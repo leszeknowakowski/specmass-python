@@ -76,7 +76,7 @@ def trend_plan(*masses: float) -> HidenScanPlan:
 class HidenScanExecutionTests(unittest.TestCase):
     def test_executes_recovered_scan_sequence_acquires_and_stops_safely(self):
         transport = ScriptedTransport(
-            (b"prefix[100/1.25,", b"105/2.50,]\r\n")
+            (b"prefix[/100/1.25,", b"/105/2.50,]\r\n")
         )
         plan = trend_plan(18.0, 28.0)
         client = HidenScanClient(transport, environment())
@@ -142,7 +142,7 @@ class HidenScanExecutionTests(unittest.TestCase):
             }
         )
         parser = HidenDataStreamParser(plan)
-        parser.feed(b"[250/{1.0,")
+        parser.feed(b"[/250/{1.0,")
         self.assertIsNone(parser.pop_cycle())
         parser.feed(b"2.0,3.0},]\n")
         cycle = parser.pop_cycle()
@@ -162,6 +162,15 @@ class HidenScanExecutionTests(unittest.TestCase):
                 autozero_supported=True,
             )
 
+    def test_report_17_requires_the_leading_elapsed_time_delimiter(self):
+        parser = HidenDataStreamParser(trend_plan(18.0))
+        parser.feed(b"[10/1.0,]\n")
+        with self.assertRaisesRegex(
+            HidenProtocolError,
+            "missing '/' before elapsed time",
+        ):
+            parser.pop_cycle()
+
     def test_stream_rejects_instrument_error_and_non_finite_data(self):
         plan = trend_plan(18.0)
         parser = HidenDataStreamParser(plan)
@@ -169,7 +178,7 @@ class HidenScanExecutionTests(unittest.TestCase):
         with self.assertRaisesRegex(HidenProtocolError, "reported an error"):
             parser.pop_cycle()
 
-        parser.feed(b"[10/NaN,]\n")
+        parser.feed(b"[/10/NaN,]\n")
         with self.assertRaisesRegex(HidenProtocolError, "non-finite"):
             parser.pop_cycle()
 
@@ -187,7 +196,7 @@ class HidenScanExecutionTests(unittest.TestCase):
             }
         )
         parser = HidenDataStreamParser(plan)
-        parser.feed(b"[10/8.0,]\n")
+        parser.feed(b"[/10/8.0,]\n")
         cycle = parser.pop_cycle()
 
         self.assertIsNotNone(cycle)
