@@ -15,7 +15,12 @@ try:
         HardwareShadowBackend,
         HidenHardwareShadowBackend,
     )
-    from specmass.hiden import HidenScanPlan, new_hiden_mass_scan
+    from specmass.hiden import (
+        HidenEnvironmentConfig,
+        HidenEnvironmentDevice,
+        HidenScanPlan,
+        new_hiden_mass_scan,
+    )
     from specmass.legacy import load_legacy_json
     from specmass.ui import MassScanDialog, SpecMassWindow
 except ImportError:
@@ -110,7 +115,8 @@ class ConfigurationGuiTests(unittest.TestCase):
         trend = dialog.scan_definition()
         self.assertEqual((trend["Start value"], trend["Stop value"]), (18.0, 18.0))
         self.assertEqual(trend["Input device"], "SEM")
-        self.assertEqual(trend["Autorange Low"], -13)
+        self.assertEqual(trend["Autorange Low"], -9)
+        self.assertEqual(trend["Start range"], -9)
 
         dialog.scan_type_box.setCurrentText("linear")
         dialog.scan_start_spin.setValue(0.4)
@@ -134,6 +140,65 @@ class ConfigurationGuiTests(unittest.TestCase):
         self.assertEqual(linear["Relative gain"], 2.0)
         self.assertEqual(linear["Options"], "option")
         self.assertEqual(linear["Changes to environment parameters"], "environment")
+
+    def test_scan_dialog_uses_input_specific_detector_defaults(self):
+        environment = HidenEnvironmentConfig(
+            mass_spec_name='"HAL RC RGA 201 #16359"',
+            modes=("Shutdown", "RGA"),
+            devices=(
+                HidenEnvironmentDevice(
+                    name="F1",
+                    index=0,
+                    format_string="%d",
+                    group_membership=1,
+                    values_by_mode=(0, 1),
+                    minimum=0,
+                    maximum=1,
+                    resolution=1,
+                ),
+                HidenEnvironmentDevice(
+                    name="Faraday_range",
+                    index=1,
+                    format_string="%d",
+                    group_membership=4,
+                    values_by_mode=(0, -5),
+                    minimum=-10,
+                    maximum=-5,
+                    resolution=1,
+                ),
+                HidenEnvironmentDevice(
+                    name="SEM_range",
+                    index=2,
+                    format_string="%d",
+                    group_membership=4,
+                    values_by_mode=(0, -7),
+                    minimum=-13,
+                    maximum=-7,
+                    resolution=1,
+                ),
+            ),
+            autozero_supported=True,
+        )
+        dialog = MassScanDialog(initial_mass=18, environment_config=environment)
+        self.addCleanup(dialog.close)
+        self.assertEqual(
+            (
+                dialog.autorange_high_spin.value(),
+                dialog.autorange_low_spin.value(),
+                dialog.start_range_spin.value(),
+            ),
+            (-7, -9, -9),
+        )
+
+        dialog.input_device_box.setCurrentText("Faraday")
+        self.assertEqual(
+            (
+                dialog.autorange_high_spin.value(),
+                dialog.autorange_low_spin.value(),
+                dialog.start_range_spin.value(),
+            ),
+            (-5, -7, -7),
+        )
 
     def test_environment_table_writes_and_updates_legacy_local_overrides(self):
         dialog = MassScanDialog(initial_mass=18, scan_number=2)

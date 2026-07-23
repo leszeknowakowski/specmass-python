@@ -602,6 +602,80 @@ def load_hiden_scan_plan(program_directory: str | Path) -> HidenScanPlan:
     return HidenScanPlan.from_mapping(raw)
 
 
+def hiden_input_range_device(
+    environment: HidenEnvironmentConfig,
+    input_device: str,
+) -> HidenEnvironmentDevice | None:
+    """Return the range device paired with one Hiden input device."""
+    normalized = input_device.strip().casefold()
+    if normalized == "scans":
+        return None
+    range_name = "nul_range" if normalized == "nul-dev" else f"{normalized}_range"
+    return next(
+        (
+            device
+            for device in environment.devices
+            if device.name.casefold() == range_name
+        ),
+        None,
+    )
+
+
+def validate_hiden_scan_ranges(
+    plan: HidenScanPlan,
+    environment: HidenEnvironmentConfig,
+) -> None:
+    """Validate scan range values before a serial transport can be opened."""
+    deployed_16359 = environment.normalized_mass_spec_name.casefold().endswith(
+        "#16359"
+    )
+    for row, scan in enumerate(plan.scans, start=1):
+        range_device = hiden_input_range_device(environment, scan.input_device)
+        if range_device is None:
+            if scan.input_device.casefold() == "scans":
+                continue
+            raise ValueError(
+                f"Hiden scan {row} input device {scan.input_device!r} has no "
+                "range definition in the instrument configuration"
+            )
+        for label, value in (
+            ("autorange high", scan.autorange_high),
+            ("autorange low", scan.autorange_low),
+            ("start range", scan.start_range),
+        ):
+            if range_device.minimum is not None and value < range_device.minimum:
+                raise ValueError(
+                    f"Hiden scan {row} {scan.input_device} {label} {value} is "
+                    f"below the device limit {range_device.minimum:g}"
+                )
+            if range_device.maximum is not None and value > range_device.maximum:
+                raise ValueError(
+                    f"Hiden scan {row} {scan.input_device} {label} {value} is "
+                    f"above the device limit {range_device.maximum:g}"
+                )
+            if (
+                range_device.minimum is not None
+                and range_device.resolution is not None
+            ):
+                steps = (value - range_device.minimum) / range_device.resolution
+                if abs(steps - round(steps)) > 1e-9:
+                    raise ValueError(
+                        f"Hiden scan {row} {scan.input_device} {label} {value} "
+                        f"does not match the device resolution "
+                        f"{range_device.resolution:g}"
+                    )
+        if (
+            deployed_16359
+            and scan.input_device.casefold() == "sem"
+            and scan.autorange_low == -13
+        ):
+            raise ValueError(
+                f"Hiden scan {row} SEM autorange low -13 was rejected by "
+                "HAL #16359 with error 049. Use the validated LabVIEW value "
+                "-9 (and start range -9)."
+            )
+
+
 def load_hiden_environment_config(path: str | Path) -> HidenEnvironmentConfig:
     """Read the LabVIEW DTLG environment cache written by the Hiden driver."""
     source = Path(path)

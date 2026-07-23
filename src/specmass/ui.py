@@ -33,6 +33,7 @@ from .hiden import (
     HidenScanPlan,
     apply_hiden_environment_settings,
     find_hiden_environment_config,
+    hiden_input_range_device,
     hiden_scan_label,
     load_hiden_connection,
     load_hiden_environment_config,
@@ -40,6 +41,7 @@ from .hiden import (
     load_hiden_scan_plan,
     new_hiden_mass_scan,
     validate_hiden_environment_settings,
+    validate_hiden_scan_ranges,
 )
 from .legacy import (
     create_program_directory,
@@ -224,6 +226,7 @@ def _create_hiden_hardware_shadow(
             environment_settings,
         )
         plan = load_hiden_scan_plan(program_directory)
+        validate_hiden_scan_ranges(plan, environment)
         timeout_seconds = max(0.001, connection.timeout_ms / 1000.0)
         transport = PySerialTransaction(
             SerialSettings(
@@ -452,6 +455,21 @@ class MassScanDialog(QtWidgets.QDialog):
         "nul-dev",
         "none",
     )
+    FALLBACK_INPUT_RANGES = {
+        "faraday": (-10, -5),
+        "sem": (-13, -7),
+        "total": (-11, -5),
+        "auxiliary1": (-2, 0),
+        "auxiliary2": (-2, 0),
+        "0v": (0, 0),
+        "test": (0, 0),
+        "scanv": (0, 0),
+        "monitor1": (0, 0),
+        "monitor2": (0, 0),
+        "monitor3": (0, 0),
+        "nul-dev": (0, 0),
+        "none": (0, 0),
+    }
 
     def __init__(
         self,
@@ -463,6 +481,7 @@ class MassScanDialog(QtWidgets.QDialog):
         environment_config: HidenEnvironmentConfig | None = None,
     ) -> None:
         super().__init__(parent)
+        self._environment_config = environment_config
         self._environment_parameters = self._make_environment_parameters(
             environment_config
         )
@@ -526,9 +545,10 @@ class MassScanDialog(QtWidgets.QDialog):
 
         self._scan_type_changed(self.scan_type_box.currentText())
         self._continuous_scan_changed(self.continuous_scan_check.isChecked())
-        self._update_detector_range_label()
         if initial_scan is not None:
             self._load_scan_definition(initial_scan)
+        else:
+            self._detector_input_changed(self.input_device_box.currentText())
         self._refresh_environment_table_values()
 
     def _build_environment_tab(self) -> QtWidgets.QWidget:
@@ -898,11 +918,11 @@ class MassScanDialog(QtWidgets.QDialog):
             self.autorange_high_spin,
             self.autorange_low_spin,
         ):
-            spin.setRange(-15, 5)
+            spin.setRange(-100, 100)
             spin.valueChanged.connect(self._update_detector_range_label)
-        self.start_range_spin.setValue(-7)
+        self.start_range_spin.setValue(-9)
         self.autorange_high_spin.setValue(-7)
-        self.autorange_low_spin.setValue(-13)
+        self.autorange_low_spin.setValue(-9)
         grid.addWidget(QtWidgets.QLabel("Start range"), 2, 0)
         grid.addWidget(self.start_range_spin, 2, 1)
         grid.addWidget(QtWidgets.QLabel("Autorange high"), 3, 0)
@@ -931,6 +951,9 @@ class MassScanDialog(QtWidgets.QDialog):
         grid.addWidget(self.relative_sensitivity_spin, 2, 5)
         grid.addWidget(QtWidgets.QLabel("Relative SEM"), 3, 4)
         grid.addWidget(self.relative_gain_spin, 3, 5)
+        self.input_device_box.currentTextChanged.connect(
+            self._detector_input_changed
+        )
         grid.setRowStretch(5, 1)
         return tab
 
@@ -978,10 +1001,46 @@ class MassScanDialog(QtWidgets.QDialog):
 
     def _update_detector_range_label(self, ignored: int | None = None) -> None:
         del ignored
-        self.detector_range_label.setText(
-            f"Configured range {self.autorange_low_spin.value()} "
-            f"to {self.autorange_high_spin.value()}"
+        minimum, maximum = self._detector_limits(
+            self.input_device_box.currentText()
         )
+        self.detector_range_label.setText(
+            f"Device limits {minimum} to {maximum}; selected "
+            f"{self.autorange_low_spin.value()} to "
+            f"{self.autorange_high_spin.value()}"
+        )
+
+    def _detector_limits(self, input_device: str) -> tuple[int, int]:
+        if self._environment_config is not None:
+            range_device = hiden_input_range_device(
+                self._environment_config,
+                input_device,
+            )
+            if (
+                range_device is not None
+                and range_device.minimum is not None
+                and range_device.maximum is not None
+            ):
+                return (
+                    int(round(range_device.minimum)),
+                    int(round(range_device.maximum)),
+                )
+        return self.FALLBACK_INPUT_RANGES.get(
+            input_device.strip().casefold(),
+            (-100, 100),
+        )
+
+    def _detector_input_changed(self, input_device: str) -> None:
+        minimum, maximum = self._detector_limits(input_device)
+        high = maximum
+        low = max(minimum, high - 2)
+        for spin, value in (
+            (self.autorange_high_spin, high),
+            (self.autorange_low_spin, low),
+            (self.start_range_spin, low),
+        ):
+            spin.setValue(value)
+        self._update_detector_range_label()
 
     def _load_scan_definition(self, scan: Mapping[str, Any]) -> None:
         definition = HidenScanDefinition.from_mapping(scan)
@@ -999,7 +1058,9 @@ class MassScanDialog(QtWidgets.QDialog):
         if input_index < 0:
             self.input_device_box.addItem(definition.input_device)
             input_index = self.input_device_box.count() - 1
+        input_blocker = QtCore.QSignalBlocker(self.input_device_box)
         self.input_device_box.setCurrentIndex(input_index)
+        del input_blocker
         self.autozero_check.setChecked(definition.use_autozero)
         self.autorange_high_spin.setValue(definition.autorange_high)
         self.autorange_low_spin.setValue(definition.autorange_low)
@@ -1026,7 +1087,7 @@ class MassScanDialog(QtWidgets.QDialog):
         stop = self.scan_stop_spin.value() if linear else start
         if linear and stop <= start:
             raise ValueError("A linear mass scan requires 'to' to be greater than 'from'")
-        return new_hiden_mass_scan(
+        scan = new_hiden_mass_scan(
             start,
             stop_mass=stop,
             increment=self.scan_step_spin.value() if linear else 1.0,
@@ -1048,6 +1109,14 @@ class MassScanDialog(QtWidgets.QDialog):
             ),
             minimum_cycle_time_seconds=self.minimum_cycle_time_spin.value(),
         )
+        if self._environment_config is not None:
+            validate_hiden_scan_ranges(
+                HidenScanPlan.from_mapping(
+                    {"Filament": "F1", "ScansParameters": [scan]}
+                ),
+                self._environment_config,
+            )
+        return scan
 
     def _validate_and_accept(self) -> None:
         try:
@@ -2750,11 +2819,15 @@ class SpecMassWindow(QtWidgets.QMainWindow):
         if self._scan_settings_working is None or self.program_path is None:
             return False
         try:
-            HidenScanPlan.from_mapping(self._scan_settings_working)
+            scan_plan = HidenScanPlan.from_mapping(self._scan_settings_working)
             environment_settings = self._current_hiden_environment_settings()
             if self._hiden_environment_config is not None:
                 validate_hiden_environment_settings(
                     environment_settings,
+                    self._hiden_environment_config,
+                )
+                validate_hiden_scan_ranges(
+                    scan_plan,
                     self._hiden_environment_config,
                 )
             scan_path = self.program_path / "ScanSettings.msdef"

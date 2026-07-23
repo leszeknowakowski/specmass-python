@@ -118,6 +118,14 @@ Direct **Upload to device** remains disabled. Saved global values and scan-local
 overrides are transmitted only after restart when an explicitly authorized
 Hiden acquisition run starts.
 
+The Detector tab reads each input's limits from `Builds\16359.cfg` and chooses
+conservative defaults when the input changes. On the deployed instrument new
+SEM rows use high `-7`, low `-9`, and start `-9`, matching the working LabVIEW
+programs. HAL `#16359` rejected SEM low `-13` with error 049, so saving or
+starting that exact setting is blocked offline. Faraday rows default to high
+`-5`, low `-7`, and start `-7`. All detector values are checked against the
+selected input's configuration before COM3 can be opened.
+
 Optionally supply `--builds` with a simulated program to resolve the configured
 mass names from the copied `Builds/data/MSDevTh` file. This is file-only access:
 
@@ -301,8 +309,8 @@ main time-series GUI. For safety, the Hiden backend is bound to the program and
 scan plan loaded at application startup; restart the application after editing
 or selecting a different program.
 
-The command is state-changing and has not yet been validated against COM3.
-Before its first controlled run, close LabVIEW and MASsoft, verify the intended
-filament and detector ranges in `ScanSettings.msdef`, and keep an operator at
-the instrument. See `docs/hiden-migration.md` for the recovered sequence and
-shutdown boundary.
+The command is state-changing. Initial guarded acquisition has been exercised
+against COM3, but every new scan definition should still be treated as a
+controlled hardware test: close LabVIEW and MASsoft, verify the intended
+filament and detector ranges, and keep an operator at the instrument. See
+`docs/hiden-migration.md` for the recovered sequence and shutdown boundary.

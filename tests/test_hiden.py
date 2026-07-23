@@ -5,6 +5,8 @@ import struct
 
 from specmass.hiden import (
     HidenConnectionConfig,
+    HidenEnvironmentConfig,
+    HidenEnvironmentDevice,
     HidenEnvironmentSettings,
     HidenScanPlan,
     apply_hiden_environment_settings,
@@ -16,6 +18,7 @@ from specmass.hiden import (
     load_hiden_environment_settings,
     new_hiden_mass_scan,
     validate_hiden_environment_settings,
+    validate_hiden_scan_ranges,
 )
 from specmass.legacy import save_legacy_json
 
@@ -112,6 +115,36 @@ def hiden_environment_dtlg() -> bytes:
 
 
 class HidenOfflineTests(unittest.TestCase):
+    @staticmethod
+    def detector_environment() -> HidenEnvironmentConfig:
+        return HidenEnvironmentConfig(
+            mass_spec_name='"HAL RC RGA 201 #16359"',
+            modes=("Shutdown", "RGA"),
+            devices=(
+                HidenEnvironmentDevice(
+                    name="Faraday_range",
+                    index=1,
+                    format_string="%d",
+                    group_membership=4,
+                    values_by_mode=(0, -5),
+                    minimum=-10,
+                    maximum=-5,
+                    resolution=1,
+                ),
+                HidenEnvironmentDevice(
+                    name="SEM_range",
+                    index=2,
+                    format_string="%d",
+                    group_membership=4,
+                    values_by_mode=(0, -7),
+                    minimum=-13,
+                    maximum=-7,
+                    resolution=1,
+                ),
+            ),
+            autozero_supported=True,
+        )
+
     def test_new_mass_scan_matches_legacy_shape_and_has_operator_label(self):
         definition = new_hiden_mass_scan(18, use_autozero=True)
         plan = HidenScanPlan.from_mapping(
@@ -185,6 +218,33 @@ class HidenOfflineTests(unittest.TestCase):
         bad["Start range"] = -10
         with self.assertRaisesRegex(ValueError, "inside the autorange limits"):
             HidenScanPlan.from_mapping({"Filament": "F1", "ScansParameters": [bad]})
+
+    def test_scan_ranges_are_checked_against_the_selected_input_device(self):
+        bad = new_hiden_mass_scan(
+            18,
+            input_device="Faraday",
+            autorange_high=-5,
+            autorange_low=-13,
+            start_range=-7,
+        )
+        plan = HidenScanPlan.from_mapping(
+            {"Filament": "F1", "ScansParameters": [bad]}
+        )
+        with self.assertRaisesRegex(ValueError, "below the device limit -10"):
+            validate_hiden_scan_ranges(plan, self.detector_environment())
+
+    def test_deployed_sem_range_rejects_the_observed_error_049_setting(self):
+        bad = new_hiden_mass_scan(
+            18,
+            autorange_high=-7,
+            autorange_low=-13,
+            start_range=-7,
+        )
+        plan = HidenScanPlan.from_mapping(
+            {"Filament": "F1", "ScansParameters": [bad]}
+        )
+        with self.assertRaisesRegex(ValueError, "error 049.*-9"):
+            validate_hiden_scan_ranges(plan, self.detector_environment())
 
     def test_scan_text_rejects_command_injection(self):
         bad = scan(18)
