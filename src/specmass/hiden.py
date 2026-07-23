@@ -61,6 +61,10 @@ class HidenEnvironmentDevice:
     format_string: str
     group_membership: int
     values_by_mode: tuple[float, ...]
+    unit: str = ""
+    minimum: float | None = None
+    maximum: float | None = None
+    resolution: float | None = None
 
     def __post_init__(self) -> None:
         if not self.name:
@@ -74,6 +78,27 @@ class HidenEnvironmentDevice:
             )
         if not self.values_by_mode or not all(isfinite(value) for value in self.values_by_mode):
             raise ValueError(f"Hiden environment values for {self.name} are invalid")
+        for label, value in (
+            ("minimum", self.minimum),
+            ("maximum", self.maximum),
+            ("resolution", self.resolution),
+        ):
+            if value is not None and not isfinite(value):
+                raise ValueError(
+                    f"Hiden environment {label} for {self.name} is invalid"
+                )
+        if (
+            self.minimum is not None
+            and self.maximum is not None
+            and self.minimum > self.maximum
+        ):
+            raise ValueError(
+                f"Hiden environment limits for {self.name} are reversed"
+            )
+        if self.resolution is not None and self.resolution <= 0:
+            raise ValueError(
+                f"Hiden environment resolution for {self.name} must be positive"
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -427,10 +452,10 @@ def load_hiden_environment_config(path: str | Path) -> HidenEnvironmentConfig:
 
     names = reader.strings("device names")
     indices = reader.integers("device indices")
-    reader.strings("device units")
-    reader.floats("device minima")
-    reader.floats("device maxima")
-    reader.floats("device resolutions")
+    units = reader.strings("device units")
+    minima = reader.floats("device minima")
+    maxima = reader.floats("device maxima")
+    resolutions = reader.floats("device resolutions")
     rows, columns, values = reader.float_matrix("values by mode")
     modes = reader.strings("operating modes")
     formats = reader.strings("device formats")
@@ -441,6 +466,10 @@ def load_hiden_environment_config(path: str | Path) -> HidenEnvironmentConfig:
     device_count = len(names)
     lengths = {
         "indices": len(indices),
+        "units": len(units),
+        "minima": len(minima),
+        "maxima": len(maxima),
+        "resolutions": len(resolutions),
         "matrix rows": rows,
         "formats": len(formats),
         "memberships": len(memberships),
@@ -462,6 +491,10 @@ def load_hiden_environment_config(path: str | Path) -> HidenEnvironmentConfig:
             format_string=formats[index],
             group_membership=memberships[index],
             values_by_mode=tuple(values[index]),
+            unit=units[index],
+            minimum=minima[index],
+            maximum=maxima[index],
+            resolution=resolutions[index],
         )
         for index in range(device_count)
     )

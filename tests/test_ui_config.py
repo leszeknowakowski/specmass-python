@@ -101,7 +101,7 @@ class ConfigurationGuiTests(unittest.TestCase):
             [dialog.tabs.tabText(index) for index in range(dialog.tabs.count())],
             ["Environment", "Scan", "Detector", "Advanced"],
         )
-        self.assertFalse(dialog.environment_change_button.isEnabled())
+        self.assertTrue(dialog.environment_change_button.isEnabled())
         self.assertEqual(
             [dialog.input_device_box.itemText(index) for index in range(dialog.input_device_box.count())],
             list(MassScanDialog.INPUT_DEVICES),
@@ -134,6 +134,39 @@ class ConfigurationGuiTests(unittest.TestCase):
         self.assertEqual(linear["Relative gain"], 2.0)
         self.assertEqual(linear["Options"], "option")
         self.assertEqual(linear["Changes to environment parameters"], "environment")
+
+    def test_environment_table_writes_and_updates_legacy_local_overrides(self):
+        dialog = MassScanDialog(initial_mass=18, scan_number=2)
+        self.addCleanup(dialog.close)
+
+        dialog.environment_parameter_table.setCurrentCell(0, 0)
+        dialog.environment_new_value.setValue(1200)
+        dialog.environment_change_button.click()
+        self.assertEqual(
+            dialog.environment_changes_edit.toPlainText(),
+            "lset multiplier 1200",
+        )
+        self.assertTrue(dialog.environment_parameter_table.item(0, 1).font().bold())
+
+        dialog.environment_new_value.setValue(1300)
+        dialog.environment_change_button.click()
+        self.assertEqual(
+            dialog.environment_changes_edit.toPlainText(),
+            "lset multiplier 1300",
+        )
+        self.assertEqual(
+            dialog.scan_definition()["Changes to environment parameters"],
+            "lset multiplier 1300",
+        )
+
+        mass_row = next(
+            row
+            for row in range(dialog.environment_parameter_table.rowCount())
+            if dialog.environment_parameter_table.item(row, 0).text() == "mass"
+        )
+        dialog.environment_parameter_table.setCurrentCell(mass_row, 0)
+        self.assertFalse(dialog.environment_change_button.isEnabled())
+        self.assertFalse(dialog.environment_new_value.isEnabled())
 
     def test_stage_add_copy_remove_and_save_use_recovery_backup(self):
         self.window._show_program_config()

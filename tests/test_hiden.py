@@ -207,6 +207,15 @@ class HidenOfflineTests(unittest.TestCase):
         self.assertEqual(environment.modes, ("Shutdown", "RGA "))
         self.assertTrue(environment.autozero_supported)
         self.assertEqual(environment.devices[0].index, 52)
+        self.assertEqual(environment.devices[0].unit, "bool")
+        self.assertEqual(
+            (
+                environment.devices[0].minimum,
+                environment.devices[0].maximum,
+                environment.devices[0].resolution,
+            ),
+            (0.0, 1.0, 1.0),
+        )
         self.assertEqual(environment.devices[1].values_by_mode, (0.0, 1.0))
 
     def test_report_is_explicitly_offline_and_resolves_known_mass_names(self):

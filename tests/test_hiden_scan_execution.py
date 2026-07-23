@@ -74,6 +74,32 @@ def trend_plan(*masses: float) -> HidenScanPlan:
 
 
 class HidenScanExecutionTests(unittest.TestCase):
+    def test_local_environment_override_uses_recovered_legacy_payload(self):
+        definition = HidenScanPlan.from_mapping(
+            {
+                "Filament": "F1",
+                "ScansParameters": [
+                    new_hiden_mass_scan(
+                        18.0,
+                        environment_changes=(
+                            "lset emission 250.00, lset electron-energy 70.00"
+                        ),
+                    )
+                ],
+            }
+        ).scans[0]
+
+        commands = HidenScanCodec.scan_row_commands(
+            1,
+            definition,
+            autozero_supported=True,
+        )
+
+        self.assertIn(
+            "sset env lset emission 250.00, lset electron-energy 70.00",
+            commands,
+        )
+
     def test_executes_recovered_scan_sequence_acquires_and_stops_safely(self):
         transport = ScriptedTransport(
             (b"prefix[/100/1.25,", b"/105/2.50,]\r\n")
