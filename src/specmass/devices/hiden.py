@@ -156,8 +156,11 @@ class HidenScanCodec:
         *,
         autozero_supported: bool,
     ) -> tuple[str, ...]:
+        row = int(row)
+        if row < 1:
+            raise HidenProtocolError("Hiden scan rows are numbered from 1")
         commands = [
-            f"sset row {abs(int(row))}",
+            f"sset row {row}",
             "sset report 17",
             f"sset output {scan.device_to_scan}",
             f"sset start {scan.start_value:.2f}",
@@ -368,7 +371,8 @@ class HidenScanClient:
 
             first_scan = plan.scans[0]
             self._send(f"sset interval {first_scan.minimum_cycle_time_seconds:f}")
-            for row, scan in enumerate(plan.scans):
+            # The instrument and LabVIEW scan editor use one-based scan rows.
+            for row, scan in enumerate(plan.scans, start=1):
                 for command in HidenScanCodec.scan_row_commands(
                     row,
                     scan,

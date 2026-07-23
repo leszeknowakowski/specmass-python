@@ -128,3 +128,9 @@ LabVIEW and MASsoft closed, a reviewed disposable trend-scan program, and an
 explicit decision to exercise the state-changing sequence. The resulting mass
 values, timing, stop behavior, filament state, and TDMS channels should then be
 compared with a short known-good LabVIEW scan before broader use.
+
+The first operator start attempt on 23 July 2026 reached scan configuration and
+the instrument rejected `sset row 0` with `C042`; no acquisition began. This
+confirmed that the deployed unit uses the same one-based row numbering shown by
+the LabVIEW scan editor. The driver now emits rows 1 through N and rejects row
+zero locally. A controlled retry remains required.

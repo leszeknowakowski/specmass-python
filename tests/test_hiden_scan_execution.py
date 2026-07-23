@@ -4,6 +4,7 @@ from specmass.devices.hiden import (
     HidenDataStreamParser,
     HidenProtocolError,
     HidenScanClient,
+    HidenScanCodec,
     HidenTrendAcquisition,
 )
 from specmass.hiden import (
@@ -115,8 +116,9 @@ class HidenScanExecutionTests(unittest.TestCase):
         self.assertIn("lput 53 0 0", transport.commands)
         self.assertIn("lput 60 0.00 1000.00", transport.commands)
         self.assertNotIn("lput 61 0.00 1.00", transport.commands)
-        self.assertIn("sset row 0", transport.commands)
         self.assertIn("sset row 1", transport.commands)
+        self.assertIn("sset row 2", transport.commands)
+        self.assertNotIn("sset row 0", transport.commands)
         self.assertIn("sset report 17", transport.commands)
         self.assertIn("sset zero 1", transport.commands)
         self.assertLess(
@@ -151,6 +153,14 @@ class HidenScanExecutionTests(unittest.TestCase):
         self.assertEqual(cycle.scans[0].values, (1.0, 2.0, 3.0))
         self.assertEqual(len(cycle.scans[0].stimuli), 3)
         self.assertAlmostEqual(cycle.scans[0].stimuli[-1], 0.6)
+
+    def test_scan_row_zero_is_rejected_before_it_can_reach_the_device(self):
+        with self.assertRaisesRegex(HidenProtocolError, "numbered from 1"):
+            HidenScanCodec.scan_row_commands(
+                0,
+                trend_plan(18.0).scans[0],
+                autozero_supported=True,
+            )
 
     def test_stream_rejects_instrument_error_and_non_finite_data(self):
         plan = trend_plan(18.0)
