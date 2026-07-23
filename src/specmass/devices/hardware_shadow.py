@@ -75,6 +75,7 @@ class HidenHardwareShadowBackend(HardwareShadowBackend):
         *,
         program_directory: str | Path | None = None,
         scan_plan: object | None = None,
+        environment_settings: object | None = None,
     ) -> None:
         super().__init__(reader)
         self.mass_acquisition = mass_acquisition
@@ -85,6 +86,7 @@ class HidenHardwareShadowBackend(HardwareShadowBackend):
             else None
         )
         self.scan_plan = scan_plan
+        self.environment_settings = environment_settings
         self.monitored_devices = (*reader.monitored_devices, "MSDevTh")
 
     def start_acquisition(self) -> None:

@@ -168,6 +168,55 @@ class ConfigurationGuiTests(unittest.TestCase):
         self.assertFalse(dialog.environment_change_button.isEnabled())
         self.assertFalse(dialog.environment_new_value.isEnabled())
 
+    def test_global_environment_table_edits_and_saves_program_settings(self):
+        self.window._show_hiden_config()
+        emission_row = next(
+            row
+            for row in range(self.window.hiden_parameter_table.rowCount())
+            if self.window.hiden_parameter_table.item(row, 0).text() == "emission"
+        )
+        self.window.hiden_parameter_table.setCurrentCell(emission_row, 1)
+        self.window.hiden_global_new_value.setValue(250.0)
+        self.window.hiden_global_change_button.click()
+
+        self.assertTrue(self.window._scan_settings_dirty)
+        self.assertEqual(
+            self.window.hiden_parameter_table.item(emission_row, 1).text(),
+            "250.00",
+        )
+        self.assertTrue(self.window._save_hiden_settings(announce=False))
+        saved = load_legacy_json(
+            self.program_path / "EnvironmentSettings.json"
+        )
+        values = {
+            item["Name"]: item["Value"] for item in saved["Parameters"]
+        }
+        self.assertEqual(values["emission"], 250.0)
+
+        self.window._load_hiden_editor()
+        self.assertEqual(
+            self.window.hiden_parameter_table.item(emission_row, 1).text(),
+            "250.00",
+        )
+        self.assertFalse(self.window._scan_settings_dirty)
+
+    def test_value_cells_can_be_edited_directly(self):
+        dialog = MassScanDialog(initial_mass=18, scan_number=2)
+        self.addCleanup(dialog.close)
+        dialog.environment_parameter_table.item(0, 1).setText("1400")
+        self.assertEqual(
+            dialog.environment_changes_edit.toPlainText(),
+            "lset multiplier 1400",
+        )
+
+        self.window._show_hiden_config()
+        self.window.hiden_parameter_table.item(0, 1).setText("1500")
+        self.assertEqual(
+            self.window._hiden_environment_working["multiplier"],
+            1500.0,
+        )
+        self.assertTrue(self.window._scan_settings_dirty)
+
     def test_stage_add_copy_remove_and_save_use_recovery_backup(self):
         self.window._show_program_config()
         self.window.stage_list.setCurrentRow(0)

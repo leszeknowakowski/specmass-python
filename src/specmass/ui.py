@@ -26,15 +26,20 @@ from .devices.serial_transport import PySerialTransaction, SerialSettings
 from .devices.simulated import SimulatedBackend
 from .hiden import (
     DEFAULT_HIDEN_MASS_NAMES,
+    HIDEN_ENVIRONMENT_SETTINGS_NAME,
     HidenEnvironmentConfig,
+    HidenEnvironmentSettings,
     HidenScanDefinition,
     HidenScanPlan,
+    apply_hiden_environment_settings,
     find_hiden_environment_config,
     hiden_scan_label,
     load_hiden_connection,
     load_hiden_environment_config,
+    load_hiden_environment_settings,
     load_hiden_scan_plan,
     new_hiden_mass_scan,
+    validate_hiden_environment_settings,
 )
 from .legacy import (
     create_program_directory,
@@ -207,8 +212,16 @@ def _create_hiden_hardware_shadow(
                 "The Hiden serial connection must use 8 data bits, no parity, "
                 "1 stop bit"
             )
-        environment = load_hiden_environment_config(
+        base_environment = load_hiden_environment_config(
             find_hiden_environment_config(builds_directory)
+        )
+        environment_settings = load_hiden_environment_settings(
+            program_directory,
+            base_environment,
+        )
+        environment = apply_hiden_environment_settings(
+            base_environment,
+            environment_settings,
         )
         plan = load_hiden_scan_plan(program_directory)
         timeout_seconds = max(0.001, connection.timeout_ms / 1000.0)
@@ -235,6 +248,7 @@ def _create_hiden_hardware_shadow(
             acquisition,
             program_directory=program_directory,
             scan_plan=plan,
+            environment_settings=environment_settings,
         )
     except Exception:
         reader.safe_shutdown()
@@ -452,6 +466,7 @@ class MassScanDialog(QtWidgets.QDialog):
         self._environment_parameters = self._make_environment_parameters(
             environment_config
         )
+        self._refreshing_environment_table = False
         self.setWindowTitle(
             "Scan editor: edit scan" if initial_scan is not None else "Scan editor: new scan"
         )
@@ -486,6 +501,9 @@ class MassScanDialog(QtWidgets.QDialog):
         layout.addWidget(self.tabs, 1)
         self.environment_parameter_table.currentCellChanged.connect(
             self._environment_parameter_selected
+        )
+        self.environment_parameter_table.itemChanged.connect(
+            self._environment_table_item_changed
         )
         self.environment_change_button.clicked.connect(
             self._change_environment_value
@@ -534,7 +552,8 @@ class MassScanDialog(QtWidgets.QDialog):
             ("Parameter", "Value", "Description")
         )
         self.environment_parameter_table.setEditTriggers(
-            QtWidgets.QAbstractItemView.NoEditTriggers
+            QtWidgets.QAbstractItemView.DoubleClicked
+            | QtWidgets.QAbstractItemView.EditKeyPressed
         )
         self.environment_parameter_table.setSelectionBehavior(
             QtWidgets.QAbstractItemView.SelectRows
@@ -546,9 +565,10 @@ class MassScanDialog(QtWidgets.QDialog):
                 parameter.description,
             )
             for column, value in enumerate(values):
-                self.environment_parameter_table.setItem(
-                    row, column, QtWidgets.QTableWidgetItem(value)
-                )
+                item = QtWidgets.QTableWidgetItem(value)
+                if column != 1 or parameter.name.casefold() == "mass":
+                    item.setFlags(item.flags() & ~QtCore.Qt.ItemIsEditable)
+                self.environment_parameter_table.setItem(row, column, item)
         header = self.environment_parameter_table.horizontalHeader()
         header.setSectionResizeMode(0, QtWidgets.QHeaderView.Stretch)
         header.setSectionResizeMode(1, QtWidgets.QHeaderView.ResizeToContents)
@@ -567,7 +587,8 @@ class MassScanDialog(QtWidgets.QDialog):
         change_row.addWidget(self.environment_change_button)
         layout.addLayout(change_row)
         note = QtWidgets.QLabel(
-            "Change creates a local override for this scan using the legacy "
+            "Double-click a Value cell, or select a row and use New value + Change. "
+            "This creates a local override for this scan using the legacy "
             "\"lset parameter value\" format. The scanned parameter itself (mass) "
             "cannot be overridden. Editing is offline; overrides are sent only when "
             "a guarded Hiden acquisition starts."
@@ -589,7 +610,7 @@ class MassScanDialog(QtWidgets.QDialog):
                     description=description,
                     format_string="%.2f" if "." in value else "%d",
                 )
-                for name, value, description in HIDEN_ENVIRONMENT_PARAMETERS
+                for name, value, description in HIDEN_ENVIRONMENT_PARAMETERS[:12]
             )
 
         try:
@@ -627,21 +648,48 @@ class MassScanDialog(QtWidgets.QDialog):
 
     def _refresh_environment_table_values(self) -> None:
         overrides = self._environment_overrides()
-        for row, parameter in enumerate(self._environment_parameters):
-            item = self.environment_parameter_table.item(row, 1)
-            override = overrides.get(parameter.name.casefold())
-            value = parameter.base_value if override is None else override
-            item.setText(parameter.render(value))
-            font = item.font()
-            font.setBold(override is not None)
-            item.setFont(font)
-            if override is None:
-                item.setBackground(QtGui.QBrush())
-                item.setToolTip("Global RGA value")
-            else:
-                item.setBackground(QtGui.QColor("#fff2b3"))
-                item.setToolTip("Local override saved for this scan")
+        self._refreshing_environment_table = True
+        try:
+            for row, parameter in enumerate(self._environment_parameters):
+                item = self.environment_parameter_table.item(row, 1)
+                override = overrides.get(parameter.name.casefold())
+                value = parameter.base_value if override is None else override
+                item.setText(parameter.render(value))
+                font = item.font()
+                font.setBold(override is not None)
+                item.setFont(font)
+                if override is None:
+                    item.setBackground(QtGui.QBrush())
+                    item.setToolTip(
+                        "Global RGA value; double-click to create a local override"
+                    )
+                else:
+                    item.setBackground(QtGui.QColor("#fff2b3"))
+                    item.setToolTip(
+                        "Local override saved for this scan; double-click to edit"
+                    )
+        finally:
+            self._refreshing_environment_table = False
         self._environment_parameter_selected()
+
+    def _environment_table_item_changed(
+        self, item: QtWidgets.QTableWidgetItem
+    ) -> None:
+        if self._refreshing_environment_table or item.column() != 1:
+            return
+        parameter = self._environment_parameters[item.row()]
+        try:
+            value = float(item.text())
+        except ValueError:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Invalid environment value",
+                f"{parameter.name} requires a numeric value.",
+            )
+            self._refresh_environment_table_values()
+            return
+        if not self._set_environment_override(parameter, value):
+            self._refresh_environment_table_values()
 
     def _environment_parameter_selected(self, *ignored: int) -> None:
         del ignored
@@ -700,10 +748,38 @@ class MassScanDialog(QtWidgets.QDialog):
             )
             return
 
-        replacement = (
-            f"lset {parameter.name} "
-            f"{parameter.render(self.environment_new_value.value())}"
+        self._set_environment_override(
+            parameter,
+            self.environment_new_value.value(),
         )
+
+    def _set_environment_override(
+        self,
+        parameter: _HidenEnvironmentParameter,
+        value: float,
+    ) -> bool:
+        if parameter.minimum is not None and value < parameter.minimum:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Invalid environment value",
+                f"{parameter.name} must be at least {parameter.minimum:g}.",
+            )
+            return False
+        if parameter.maximum is not None and value > parameter.maximum:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Invalid environment value",
+                f"{parameter.name} must be at most {parameter.maximum:g}.",
+            )
+            return False
+        if parameter.format_string == "%d" and value != round(value):
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Invalid environment value",
+                f"{parameter.name} requires an integer value.",
+            )
+            return False
+        replacement = f"lset {parameter.name} {parameter.render(value)}"
         commands = [
             command.strip()
             for command in self.environment_changes_edit.toPlainText().split(",")
@@ -725,6 +801,7 @@ class MassScanDialog(QtWidgets.QDialog):
         if not replaced:
             updated.append(replacement)
         self.environment_changes_edit.setPlainText(", ".join(updated))
+        return True
 
     def _build_scan_tab(self, initial_mass: float) -> QtWidgets.QWidget:
         tab = QtWidgets.QWidget()
@@ -1109,6 +1186,16 @@ class SpecMassWindow(QtWidgets.QMainWindow):
                 )
             except (FileNotFoundError, OSError, TypeError, ValueError):
                 pass
+        self._hiden_global_parameters = (
+            MassScanDialog._make_environment_parameters(
+                self._hiden_environment_config
+            )
+        )
+        self._hiden_environment_working = {
+            parameter.name: parameter.base_value
+            for parameter in self._hiden_global_parameters
+        }
+        self._refreshing_hiden_parameter_table = False
 
         self._build_layout()
         self._apply_styles()
@@ -1443,24 +1530,38 @@ class SpecMassWindow(QtWidgets.QMainWindow):
         filament_column.addWidget(self.hiden_filament)
         identity_row.addLayout(filament_column)
         left_layout.addLayout(identity_row)
-        left_layout.addWidget(self._section_label("Environment parameters (read-only snapshot)"))
+        left_layout.addWidget(self._section_label("Program global environment parameters"))
         self.hiden_parameter_table = QtWidgets.QTableWidget(
-            len(HIDEN_ENVIRONMENT_PARAMETERS), 3
+            len(self._hiden_global_parameters), 3
         )
         self.hiden_parameter_table.setHorizontalHeaderLabels(
             ("Parameter", "Value", "Description")
         )
         self.hiden_parameter_table.setEditTriggers(
-            QtWidgets.QAbstractItemView.NoEditTriggers
+            QtWidgets.QAbstractItemView.DoubleClicked
+            | QtWidgets.QAbstractItemView.EditKeyPressed
         )
         self.hiden_parameter_table.setSelectionBehavior(
             QtWidgets.QAbstractItemView.SelectRows
         )
-        for row, values in enumerate(HIDEN_ENVIRONMENT_PARAMETERS):
+        for row, parameter in enumerate(self._hiden_global_parameters):
+            values = (
+                parameter.name,
+                parameter.render(parameter.base_value),
+                parameter.description,
+            )
             for column, value in enumerate(values):
-                self.hiden_parameter_table.setItem(
-                    row, column, QtWidgets.QTableWidgetItem(value)
-                )
+                item = QtWidgets.QTableWidgetItem(value)
+                if column != 1:
+                    item.setFlags(item.flags() & ~QtCore.Qt.ItemIsEditable)
+                self.hiden_parameter_table.setItem(row, column, item)
+        self.hiden_parameter_table.setCurrentCell(0, 0)
+        self.hiden_parameter_table.currentCellChanged.connect(
+            self._hiden_global_parameter_selected
+        )
+        self.hiden_parameter_table.itemChanged.connect(
+            self._hiden_global_table_item_changed
+        )
         self.hiden_parameter_table.horizontalHeader().setSectionResizeMode(
             0, QtWidgets.QHeaderView.Stretch
         )
@@ -1471,6 +1572,25 @@ class SpecMassWindow(QtWidgets.QMainWindow):
             2, QtWidgets.QHeaderView.Stretch
         )
         left_layout.addWidget(self.hiden_parameter_table, 1)
+        global_change_row = QtWidgets.QHBoxLayout()
+        global_change_row.addWidget(QtWidgets.QLabel("New value"))
+        self.hiden_global_new_value = QtWidgets.QDoubleSpinBox()
+        global_change_row.addWidget(self.hiden_global_new_value, 1)
+        self.hiden_global_change_button = QtWidgets.QPushButton("Change")
+        self.hiden_global_change_button.clicked.connect(
+            self._change_hiden_global_value
+        )
+        self.hiden_global_new_value.lineEdit().returnPressed.connect(
+            self._change_hiden_global_value
+        )
+        global_change_row.addWidget(self.hiden_global_change_button)
+        left_layout.addLayout(global_change_row)
+        self.hiden_environment_path = QtWidgets.QLabel(
+            HIDEN_ENVIRONMENT_SETTINGS_NAME
+        )
+        self.hiden_environment_path.setObjectName("muted")
+        self.hiden_environment_path.setWordWrap(True)
+        left_layout.addWidget(self.hiden_environment_path)
         self.hiden_autozero_supported = QtWidgets.QCheckBox("Autozero supported")
         self.hiden_autozero_supported.setChecked(True)
         self.hiden_autozero_supported.setEnabled(False)
@@ -1478,7 +1598,8 @@ class SpecMassWindow(QtWidgets.QMainWindow):
         self.hiden_upload_button = QtWidgets.QPushButton("Upload to device")
         self.hiden_upload_button.setEnabled(False)
         self.hiden_upload_button.setToolTip(
-            "Disabled: Hiden environment/scan writes have not been implemented or validated."
+            "Direct upload remains disabled. Saved global values and scans are "
+            "uploaded only by a guarded Hiden acquisition START."
         )
         left_layout.addWidget(self.hiden_upload_button)
 
@@ -1531,7 +1652,7 @@ class SpecMassWindow(QtWidgets.QMainWindow):
         right_layout.addWidget(self.hiden_editor_status)
         button_row = QtWidgets.QHBoxLayout()
         self.save_scan_settings_button = QtWidgets.QPushButton(
-            "Save ScanSettings.msdef"
+            "Save environment + scans"
         )
         self.save_scan_settings_button.clicked.connect(self._save_hiden_settings)
         self.back_to_stage_button = QtWidgets.QPushButton("Back to stage config")
@@ -2282,7 +2403,13 @@ class SpecMassWindow(QtWidgets.QMainWindow):
             return
         if not self._confirm_stage_changes():
             return
-        self._load_hiden_editor()
+        try:
+            self._load_hiden_editor()
+        except (OSError, TypeError, ValueError) as exc:
+            QtWidgets.QMessageBox.critical(
+                self, "Cannot load Hiden settings", str(exc)
+            )
+            return
         self.page_stack.setCurrentWidget(self.hiden_config_page)
         self._update_controls()
 
@@ -2306,8 +2433,194 @@ class SpecMassWindow(QtWidgets.QMainWindow):
         scan_path = self.program_path / "ScanSettings.msdef"
         self.hiden_scan_path.setText(str(scan_path))
         self.hiden_scan_path.setToolTip(str(scan_path.resolve()))
+        self._load_hiden_environment_editor()
         self._refresh_hiden_scan_list()
         self._update_hiden_editor_controls()
+
+    def _load_hiden_environment_editor(self) -> None:
+        assert self.program_path is not None
+        values = {
+            parameter.name: parameter.base_value
+            for parameter in self._hiden_global_parameters
+        }
+        if self._hiden_environment_config is not None:
+            settings = load_hiden_environment_settings(
+                self.program_path,
+                self._hiden_environment_config,
+            )
+        else:
+            path = self.program_path / HIDEN_ENVIRONMENT_SETTINGS_NAME
+            if path.is_file():
+                raw = load_legacy_json(path)
+                if not isinstance(raw, Mapping):
+                    raise ValueError(
+                        f"Hiden environment settings must be an object: {path}"
+                    )
+                settings = HidenEnvironmentSettings.from_mapping(raw)
+            else:
+                settings = HidenEnvironmentSettings(mode="RGA", values=())
+        known_names = {name.casefold(): name for name in values}
+        for name, value in settings.values:
+            canonical = known_names.get(name.casefold())
+            if canonical is not None:
+                values[canonical] = value
+        self._hiden_environment_working = values
+        path = self.program_path / HIDEN_ENVIRONMENT_SETTINGS_NAME
+        self.hiden_environment_path.setText(str(path))
+        self.hiden_environment_path.setToolTip(str(path.resolve()))
+        self._refresh_hiden_global_table()
+
+    def _current_hiden_environment_settings(self) -> HidenEnvironmentSettings:
+        return HidenEnvironmentSettings(
+            mode="RGA",
+            values=tuple(
+                (
+                    parameter.name,
+                    self._hiden_environment_working[parameter.name],
+                )
+                for parameter in self._hiden_global_parameters
+            ),
+        )
+
+    def _working_hiden_environment_config(
+        self,
+    ) -> HidenEnvironmentConfig | None:
+        if self._hiden_environment_config is None:
+            return None
+        return apply_hiden_environment_settings(
+            self._hiden_environment_config,
+            self._current_hiden_environment_settings(),
+        )
+
+    def _refresh_hiden_global_table(self) -> None:
+        self._refreshing_hiden_parameter_table = True
+        try:
+            for row, parameter in enumerate(self._hiden_global_parameters):
+                value = self._hiden_environment_working.get(
+                    parameter.name, parameter.base_value
+                )
+                item = self.hiden_parameter_table.item(row, 1)
+                item.setText(parameter.render(value))
+                changed = value != parameter.base_value
+                font = item.font()
+                font.setBold(changed)
+                item.setFont(font)
+                if changed:
+                    item.setBackground(QtGui.QColor("#fff2b3"))
+                    item.setToolTip(
+                        "Program global value differs from the Builds snapshot; "
+                        "double-click to edit"
+                    )
+                else:
+                    item.setBackground(QtGui.QBrush())
+                    item.setToolTip(
+                        "Program global value; double-click to edit"
+                    )
+        finally:
+            self._refreshing_hiden_parameter_table = False
+        self._hiden_global_parameter_selected()
+
+    def _hiden_global_parameter_selected(self, *ignored: int) -> None:
+        del ignored
+        row = self.hiden_parameter_table.currentRow()
+        has_editor = self._scan_settings_working is not None
+        if not 0 <= row < len(self._hiden_global_parameters):
+            self.hiden_global_new_value.setEnabled(False)
+            self.hiden_global_change_button.setEnabled(False)
+            return
+        parameter = self._hiden_global_parameters[row]
+        minimum = (
+            parameter.minimum
+            if parameter.minimum is not None
+            else -1_000_000_000.0
+        )
+        maximum = (
+            parameter.maximum
+            if parameter.maximum is not None
+            else 1_000_000_000.0
+        )
+        self.hiden_global_new_value.blockSignals(True)
+        self.hiden_global_new_value.setDecimals(
+            0 if parameter.format_string == "%d" else 2
+        )
+        self.hiden_global_new_value.setRange(minimum, maximum)
+        if parameter.resolution is not None:
+            self.hiden_global_new_value.setSingleStep(parameter.resolution)
+        self.hiden_global_new_value.setValue(
+            self._hiden_environment_working.get(
+                parameter.name, parameter.base_value
+            )
+        )
+        self.hiden_global_new_value.blockSignals(False)
+        self.hiden_global_new_value.setEnabled(has_editor)
+        self.hiden_global_change_button.setEnabled(has_editor)
+
+    def _hiden_global_table_item_changed(
+        self, item: QtWidgets.QTableWidgetItem
+    ) -> None:
+        if self._refreshing_hiden_parameter_table or item.column() != 1:
+            return
+        parameter = self._hiden_global_parameters[item.row()]
+        try:
+            value = float(item.text())
+        except ValueError:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Invalid global environment value",
+                f"{parameter.name} requires a numeric value.",
+            )
+            self._refresh_hiden_global_table()
+            return
+        if not self._set_hiden_global_value(parameter, value):
+            self._refresh_hiden_global_table()
+
+    def _change_hiden_global_value(self) -> None:
+        row = self.hiden_parameter_table.currentRow()
+        if not 0 <= row < len(self._hiden_global_parameters):
+            return
+        self._set_hiden_global_value(
+            self._hiden_global_parameters[row],
+            self.hiden_global_new_value.value(),
+        )
+
+    def _set_hiden_global_value(
+        self,
+        parameter: _HidenEnvironmentParameter,
+        value: float,
+    ) -> bool:
+        if parameter.minimum is not None and value < parameter.minimum:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Invalid global environment value",
+                f"{parameter.name} must be at least {parameter.minimum:g}.",
+            )
+            return False
+        if parameter.maximum is not None and value > parameter.maximum:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Invalid global environment value",
+                f"{parameter.name} must be at most {parameter.maximum:g}.",
+            )
+            return False
+        if parameter.format_string == "%d" and value != round(value):
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Invalid global environment value",
+                f"{parameter.name} requires an integer value.",
+            )
+            return False
+        rendered_value = (
+            float(round(value))
+            if parameter.format_string == "%d"
+            else float(parameter.render(value))
+        )
+        if self._hiden_environment_working.get(parameter.name) == rendered_value:
+            self._refresh_hiden_global_table()
+            return True
+        self._hiden_environment_working[parameter.name] = rendered_value
+        self._set_hiden_dirty()
+        self._refresh_hiden_global_table()
+        return True
 
     def _refresh_hiden_scan_list(self, *, select_row: int | None = None) -> None:
         self.hiden_scan_list.clear()
@@ -2349,7 +2662,7 @@ class SpecMassWindow(QtWidgets.QMainWindow):
         dialog = MassScanDialog(
             self,
             scan_number=len(scans) + 1,
-            environment_config=self._hiden_environment_config,
+            environment_config=self._working_hiden_environment_config(),
         )
         if dialog.exec_() != QtWidgets.QDialog.Accepted:
             return
@@ -2367,7 +2680,7 @@ class SpecMassWindow(QtWidgets.QMainWindow):
             self,
             initial_scan=original,
             scan_number=row + 1,
-            environment_config=self._hiden_environment_config,
+            environment_config=self._working_hiden_environment_config(),
         )
         if dialog.exec_() != QtWidgets.QDialog.Accepted:
             return
@@ -2409,16 +2722,20 @@ class SpecMassWindow(QtWidgets.QMainWindow):
         self.remove_mass_button.setEnabled(
             has_editor and bool(scans) and selected
         )
+        self.hiden_parameter_table.setEnabled(has_editor)
+        self._hiden_global_parameter_selected()
         self.save_scan_settings_button.setEnabled(
             has_editor and bool(scans) and self._scan_settings_dirty
         )
         if self._scan_settings_dirty:
             self.hiden_editor_status.setText(
-                "Unsaved ScanSettings.msdef changes — still offline; no device command sent"
+                "Unsaved environment/scan changes; still offline and no "
+                "device command has been sent"
             )
         elif has_editor:
             self.hiden_editor_status.setText(
-                "Saved/offline editor — opening and editing sends no Hiden command"
+                "Saved/offline editor; global values are applied only by "
+                "a guarded acquisition START"
             )
         else:
             self.hiden_editor_status.setText("No scan settings loaded")
@@ -2434,10 +2751,25 @@ class SpecMassWindow(QtWidgets.QMainWindow):
             return False
         try:
             HidenScanPlan.from_mapping(self._scan_settings_working)
-            path = self.program_path / "ScanSettings.msdef"
-            save_legacy_json(path, self._scan_settings_working)
+            environment_settings = self._current_hiden_environment_settings()
+            if self._hiden_environment_config is not None:
+                validate_hiden_environment_settings(
+                    environment_settings,
+                    self._hiden_environment_config,
+                )
+            scan_path = self.program_path / "ScanSettings.msdef"
+            environment_path = (
+                self.program_path / HIDEN_ENVIRONMENT_SETTINGS_NAME
+            )
+            save_legacy_json(scan_path, self._scan_settings_working)
+            save_legacy_json(
+                environment_path,
+                environment_settings.to_mapping(),
+            )
         except (OSError, TypeError, ValueError) as exc:
-            QtWidgets.QMessageBox.critical(self, "Cannot save scan settings", str(exc))
+            QtWidgets.QMessageBox.critical(
+                self, "Cannot save Hiden settings", str(exc)
+            )
             return False
         assert self.program is not None
         settings = copy.deepcopy(self._scan_settings_working)
@@ -2449,7 +2781,8 @@ class SpecMassWindow(QtWidgets.QMainWindow):
         self._update_hiden_editor_controls()
         if announce:
             self.hiden_editor_status.setText(
-                f"Saved {path.name} atomically — no Hiden command sent"
+                f"Saved {environment_path.name} and {scan_path.name}; "
+                "no Hiden command sent"
             )
         return True
 
@@ -2458,8 +2791,8 @@ class SpecMassWindow(QtWidgets.QMainWindow):
             return True
         answer = QtWidgets.QMessageBox.warning(
             self,
-            "Unsaved Hiden scan settings",
-            "Save the ScanSettings.msdef changes before leaving this screen?",
+            "Unsaved Hiden settings",
+            "Save the environment and scan changes before leaving this screen?",
             QtWidgets.QMessageBox.Save
             | QtWidgets.QMessageBox.Discard
             | QtWidgets.QMessageBox.Cancel,
@@ -2574,6 +2907,25 @@ class SpecMassWindow(QtWidgets.QMainWindow):
                 "ScanSettings.msdef changed after Hiden acquisition was prepared. "
                 "Close and restart the application so the guarded COM3 driver uses "
                 "the reviewed scan plan."
+            )
+        expected_environment = getattr(
+            self.shadow_backend,
+            "environment_settings",
+            None,
+        )
+        if (
+            expected_environment is not None
+            and self._hiden_environment_config is not None
+            and load_hiden_environment_settings(
+                path,
+                self._hiden_environment_config,
+            )
+            != expected_environment
+        ):
+            raise ValueError(
+                f"{HIDEN_ENVIRONMENT_SETTINGS_NAME} changed after Hiden "
+                "acquisition was prepared. Close and restart the application so "
+                "the guarded COM3 driver uses the reviewed global environment."
             )
 
     def _start_hardware_monitor(self) -> None:

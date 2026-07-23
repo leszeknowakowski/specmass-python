@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import argparse
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timezone
 import json
 from math import isfinite
@@ -36,6 +36,8 @@ DEFAULT_HIDEN_MASS_NAMES: dict[float, str] = {
     40.0: "Ar",
     44.0: "CO2",
 }
+
+HIDEN_ENVIRONMENT_SETTINGS_NAME = "EnvironmentSettings.json"
 
 
 @dataclass(frozen=True, slots=True)
@@ -126,6 +128,168 @@ class HidenEnvironmentConfig:
         if len(text) >= 2 and text[0] == text[-1] and text[0] in ("'", '"'):
             text = text[1:-1].strip()
         return text
+
+
+@dataclass(frozen=True, slots=True)
+class HidenEnvironmentSettings:
+    """Program-local overrides for one Hiden global operating mode."""
+
+    mode: str
+    values: tuple[tuple[str, float], ...]
+
+    def __post_init__(self) -> None:
+        if not self.mode.strip():
+            raise ValueError("Hiden environment mode cannot be empty")
+        names: set[str] = set()
+        for name, value in self.values:
+            normalized = name.strip().casefold()
+            if not normalized:
+                raise ValueError("Hiden environment parameter name cannot be empty")
+            if normalized in names:
+                raise ValueError(
+                    f"Duplicate Hiden environment parameter: {name!r}"
+                )
+            if not isfinite(value):
+                raise ValueError(
+                    f"Hiden environment value for {name!r} is not finite"
+                )
+            names.add(normalized)
+
+    @classmethod
+    def from_mapping(
+        cls, data: Mapping[str, Any]
+    ) -> "HidenEnvironmentSettings":
+        raw_parameters = data.get("Parameters", ())
+        if not isinstance(raw_parameters, Sequence) or isinstance(
+            raw_parameters, (str, bytes, bytearray)
+        ):
+            raise ValueError("Hiden environment Parameters must be an array")
+        values: list[tuple[str, float]] = []
+        for index, item in enumerate(raw_parameters):
+            if not isinstance(item, Mapping):
+                raise ValueError(
+                    f"Hiden environment Parameters[{index}] must be an object"
+                )
+            if "Value" not in item:
+                raise ValueError(
+                    f"Hiden environment Parameters[{index}] has no Value"
+                )
+            values.append((str(item.get("Name", "")), float(item["Value"])))
+        return cls(
+            mode=str(data.get("Global mode", "RGA")),
+            values=tuple(values),
+        )
+
+    def to_mapping(self) -> dict[str, Any]:
+        return {
+            "Global mode": self.mode,
+            "Parameters": [
+                {"Name": name, "Value": value} for name, value in self.values
+            ],
+        }
+
+
+def default_hiden_environment_settings(
+    environment: HidenEnvironmentConfig,
+    *,
+    mode: str = "RGA",
+) -> HidenEnvironmentSettings:
+    mode_index = _hiden_environment_mode_index(environment, mode)
+    return HidenEnvironmentSettings(
+        mode=environment.modes[mode_index].strip(),
+        values=tuple(
+            (device.name, device.values_by_mode[mode_index])
+            for device in environment.devices
+            if device.group_membership & 1
+        ),
+    )
+
+
+def validate_hiden_environment_settings(
+    settings: HidenEnvironmentSettings,
+    environment: HidenEnvironmentConfig,
+) -> None:
+    _hiden_environment_mode_index(environment, settings.mode)
+    devices = {
+        device.name.casefold(): device
+        for device in environment.devices
+        if device.group_membership & 1
+    }
+    for name, value in settings.values:
+        device = devices.get(name.strip().casefold())
+        if device is None:
+            raise ValueError(
+                f"Unknown Hiden global environment parameter: {name!r}"
+            )
+        if device.minimum is not None and value < device.minimum:
+            raise ValueError(
+                f"Hiden environment {name} value {value:g} is below "
+                f"{device.minimum:g}"
+            )
+        if device.maximum is not None and value > device.maximum:
+            raise ValueError(
+                f"Hiden environment {name} value {value:g} is above "
+                f"{device.maximum:g}"
+            )
+        if device.format_string == "%d" and value != round(value):
+            raise ValueError(f"Hiden environment {name} requires an integer value")
+
+
+def apply_hiden_environment_settings(
+    environment: HidenEnvironmentConfig,
+    settings: HidenEnvironmentSettings,
+) -> HidenEnvironmentConfig:
+    """Return a copy with program-local values applied to one operating mode."""
+    validate_hiden_environment_settings(settings, environment)
+    mode_index = _hiden_environment_mode_index(environment, settings.mode)
+    overrides = {
+        name.strip().casefold(): value for name, value in settings.values
+    }
+    devices: list[HidenEnvironmentDevice] = []
+    for device in environment.devices:
+        value = overrides.get(device.name.casefold())
+        if value is None:
+            devices.append(device)
+            continue
+        values_by_mode = list(device.values_by_mode)
+        values_by_mode[mode_index] = value
+        devices.append(
+            replace(device, values_by_mode=tuple(values_by_mode))
+        )
+    return replace(environment, devices=tuple(devices))
+
+
+def load_hiden_environment_settings(
+    program_directory: str | Path,
+    environment: HidenEnvironmentConfig,
+) -> HidenEnvironmentSettings:
+    path = Path(program_directory) / HIDEN_ENVIRONMENT_SETTINGS_NAME
+    if not path.is_file():
+        return default_hiden_environment_settings(environment)
+    raw = load_legacy_json(path)
+    if not isinstance(raw, Mapping):
+        raise ValueError(f"Hiden environment settings must be an object: {path}")
+    settings = HidenEnvironmentSettings.from_mapping(raw)
+    validate_hiden_environment_settings(settings, environment)
+    return settings
+
+
+def _hiden_environment_mode_index(
+    environment: HidenEnvironmentConfig,
+    mode: str,
+) -> int:
+    normalized = mode.strip().casefold()
+    try:
+        return next(
+            index
+            for index, candidate in enumerate(environment.modes)
+            if candidate.strip().casefold() == normalized
+        )
+    except StopIteration as exc:
+        modes = ", ".join(repr(item.strip()) for item in environment.modes)
+        raise ValueError(
+            f"Unknown Hiden environment mode {mode!r}; expected one of {modes}"
+        ) from exc
 
 
 @dataclass(frozen=True, slots=True)

@@ -140,6 +140,10 @@ def create_program_directory(directory: str | Path) -> Path:
         root / "ScanSettings.msdef",
         {"Filament": "F1", "ScansParameters": []},
     )
+    save_legacy_json(
+        root / "EnvironmentSettings.json",
+        {"Global mode": "RGA", "Parameters": []},
+    )
     return root
 
 

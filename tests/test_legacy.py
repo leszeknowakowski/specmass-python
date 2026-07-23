@@ -51,11 +51,18 @@ class LegacyReaderTests(unittest.TestCase):
             created = create_program_directory(root)
             program = load_program(created)
             scan_settings = load_legacy_json(root / "ScanSettings.msdef")
+            environment_settings = load_legacy_json(
+                root / "EnvironmentSettings.json"
+            )
 
         self.assertEqual(created, root)
         self.assertEqual([stage.name for stage in program.stages], ["Stage1"])
         self.assertEqual(len(program.stages[0].start_flows), 4)
         self.assertEqual(scan_settings, {"Filament": "F1", "ScansParameters": []})
+        self.assertEqual(
+            environment_settings,
+            {"Global mode": "RGA", "Parameters": []},
+        )
 
     def test_create_program_directory_refuses_nonempty_folder(self):
         with tempfile.TemporaryDirectory() as directory:

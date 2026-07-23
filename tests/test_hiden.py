@@ -5,13 +5,19 @@ import struct
 
 from specmass.hiden import (
     HidenConnectionConfig,
+    HidenEnvironmentSettings,
     HidenScanPlan,
+    apply_hiden_environment_settings,
     build_hiden_offline_report,
+    default_hiden_environment_settings,
     find_hiden_environment_config,
     hiden_scan_label,
     load_hiden_environment_config,
+    load_hiden_environment_settings,
     new_hiden_mass_scan,
+    validate_hiden_environment_settings,
 )
+from specmass.legacy import save_legacy_json
 
 
 DEPLOYED_CONNECTION = {
@@ -217,6 +223,49 @@ class HidenOfflineTests(unittest.TestCase):
             (0.0, 1.0, 1.0),
         )
         self.assertEqual(environment.devices[1].values_by_mode, (0.0, 1.0))
+
+    def test_program_environment_settings_validate_round_trip_and_apply(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            environment_path = root / "16359.cfg"
+            environment_path.write_bytes(hiden_environment_dtlg())
+            environment = load_hiden_environment_config(environment_path)
+            settings = HidenEnvironmentSettings(
+                mode="RGA",
+                values=(("F1", 1.0), ("F2", 0.0)),
+            )
+            validate_hiden_environment_settings(settings, environment)
+            save_legacy_json(
+                root / "EnvironmentSettings.json",
+                settings.to_mapping(),
+            )
+            loaded = load_hiden_environment_settings(root, environment)
+            applied = apply_hiden_environment_settings(environment, loaded)
+
+        self.assertEqual(loaded, settings)
+        self.assertEqual(applied.devices[0].values_by_mode, (0.0, 1.0))
+        self.assertEqual(applied.devices[1].values_by_mode, (0.0, 0.0))
+        self.assertEqual(
+            default_hiden_environment_settings(environment).values,
+            (("F1", 0.0), ("F2", 1.0)),
+        )
+
+    def test_program_environment_settings_reject_unknown_and_out_of_range(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "16359.cfg"
+            path.write_bytes(hiden_environment_dtlg())
+            environment = load_hiden_environment_config(path)
+
+        with self.assertRaisesRegex(ValueError, "Unknown Hiden global"):
+            validate_hiden_environment_settings(
+                HidenEnvironmentSettings("RGA", (("not-a-device", 1.0),)),
+                environment,
+            )
+        with self.assertRaisesRegex(ValueError, "above"):
+            validate_hiden_environment_settings(
+                HidenEnvironmentSettings("RGA", (("F1", 2.0),)),
+                environment,
+            )
 
     def test_report_is_explicitly_offline_and_resolves_known_mass_names(self):
         with tempfile.TemporaryDirectory() as directory:

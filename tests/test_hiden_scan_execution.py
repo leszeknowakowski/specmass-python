@@ -10,7 +10,9 @@ from specmass.devices.hiden import (
 from specmass.hiden import (
     HidenEnvironmentConfig,
     HidenEnvironmentDevice,
+    HidenEnvironmentSettings,
     HidenScanPlan,
+    apply_hiden_environment_settings,
     new_hiden_mass_scan,
 )
 
@@ -74,6 +76,23 @@ def trend_plan(*masses: float) -> HidenScanPlan:
 
 
 class HidenScanExecutionTests(unittest.TestCase):
+    def test_program_global_environment_value_changes_uploaded_lput_value(self):
+        configured = apply_hiden_environment_settings(
+            environment(),
+            HidenEnvironmentSettings(
+                mode="RGA",
+                values=(("emission", 250.0),),
+            ),
+        )
+
+        commands = HidenScanCodec.environment_commands(
+            configured,
+            filament="F1",
+        )
+
+        self.assertIn("lput 60 0.00 250.00", commands)
+        self.assertNotIn("lput 60 0.00 1000.00", commands)
+
     def test_local_environment_override_uses_recovered_legacy_payload(self):
         definition = HidenScanPlan.from_mapping(
             {

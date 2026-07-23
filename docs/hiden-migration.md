@@ -105,21 +105,24 @@ Environment, Scan, Detector, and Advanced. It supports trend and linear mass
 scans, the full detector list shown by the deployed editor, autozero, ranges,
 dwell/settle percentages, relative factors, cycle controls, and the two raw
 legacy advanced fields. The Hiden screen can add, edit, and remove these
-definitions and explicitly save the selected program's `ScanSettings.msdef`.
+definitions and explicitly save the selected program's `ScanSettings.msdef`
+and `EnvironmentSettings.json`.
 Edit reopens the same four-tab dialog with the selected scan populated and
 preserves unknown legacy fields when applying the known values. The editor
 validates the same typed `HidenScanPlan` used by the offline report, preserves
 unknown top-level settings, writes atomically, and prompts before discarding
 unsaved changes.
 
-This editor has no serial client or device-upload callback. The displayed
-environment values are a read-only reference snapshot and the **Upload to
-device** button is disabled. The saved identity is labeled with a tooltip that
-states that opening the screen does not repeat the COM3 identity query.
-The copied Hiden manual confirms that Environment-tab edits are returned as
-global mass-spectrometer I/O-device values, separately from the scan array.
-Consequently that tab's Change control remains disabled rather than inventing
-an incompatible `ScanSettings.msdef` representation.
+This editor has no serial client or direct device-upload callback, and
+**Upload to device** remains disabled. Global RGA values are editable and saved
+as program-local overrides in `EnvironmentSettings.json`; the copied binary
+`Builds\16359.cfg` is never modified. A scan's Environment table produces the
+legacy documented `lset parameter value` commands in the scan's
+`Changes to environment parameters` field. Global and local Value cells can be
+double-clicked, or changed with the numeric control below the table. The scanned
+`mass` parameter is edited on the Scan tab and cannot also be a local override.
+Saved settings are applied only when a new guarded Hiden acquisition process is
+started.
 
 ## Next controlled milestone
 

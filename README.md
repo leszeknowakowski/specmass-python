@@ -85,7 +85,8 @@ The header now follows the LabVIEW three-screen workflow:
 1. **Monitor screen** shows the live/simulated dashboard and plots.
 2. **Config screen** shows the selected program's stages, temperature settings,
    valves, and Brooks flow settings. **New program** creates `Stage1.msdef` and
-   `ScanSettings.msdef` in a new or empty operator-chosen folder. Stages can be
+   `ScanSettings.msdef` plus `EnvironmentSettings.json` in a new or empty
+   operator-chosen folder. Stages can be
    added, copied, removed, and edited; changes remain pending until **Save
    program**. Before replacing or removing an existing stage file, Save places
    a recovery copy below the program's `.specmass-backup` folder.
@@ -96,7 +97,7 @@ The header now follows the LabVIEW three-screen workflow:
    exposes the legacy input-device list, autozero, ranges, dwell, settle,
    relative sensitivity, and relative gain. Select a row and use **Edit** (or
    double-click it) to reopen the populated four-tab editor, or use `−` to
-   remove it, then explicitly select **Save ScanSettings.msdef**.
+   remove it, then explicitly select **Save environment + scans**.
 
 Simulation `.tdms` output (or `.csv` when `nptdms` is unavailable) is created
 directly in the loaded program folder with a timestamped, non-overwriting name.
@@ -106,18 +107,16 @@ remain active while plotting and logging continue down to the selected cooling
 threshold. Uncheck it before START to close the run immediately after the safe
 stop sequence instead.
 
-The scan editor preserves the legacy JSON field names, validates the complete
-scan plan, and atomically replaces only the selected program folder's
-`ScanSettings.msdef`. Unsaved changes require Save or Discard before leaving.
-Opening the screen, adding/editing/removing masses, and saving do not open COM3. The
-environment-parameter table is read-only and **Upload to device** is visibly
-disabled. A saved scan plan is uploaded only when an explicitly authorized
-Hiden acquisition run starts; editing never changes a live instrument.
-The Environment tab in the new-scan dialog is also a read-only reference: the
-copied Hiden manual confirms those values are global live-device state returned
-separately from the scan array. The Advanced tab maps directly to the legacy
-`Options` and `Changes to environment parameters` scan fields without sending
-them anywhere.
+The editor preserves the legacy scan JSON field names and stores program-global
+RGA values separately in `EnvironmentSettings.json`, avoiding any change to the
+copied binary `Builds\16359.cfg`. Double-click a Value cell or use **New value**
+and **Change**. In a scan's Environment tab this creates the documented local
+`lset parameter value` override; `mass` must be changed on the Scan tab because
+Hiden forbids overriding the parameter being scanned. Unsaved changes require
+Save or Discard before leaving. Opening, editing, and saving never open COM3.
+Direct **Upload to device** remains disabled. Saved global values and scan-local
+overrides are transmitted only after restart when an explicitly authorized
+Hiden acquisition run starts.
 
 Optionally supply `--builds` with a simulated program to resolve the configured
 mass names from the copied `Builds/data/MSDevTh` file. This is file-only access:
